@@ -10,6 +10,7 @@ class MemoryStore:
         self.history_dir = workspace / "history"
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.history_dir / "HISTORY.md"
+        self.full_history_file = self.history_dir / "FULL_HISTORY.md"
         self._ensure_paths()
         
     def _ensure_paths(self):
@@ -50,6 +51,7 @@ class MemoryStore:
 
         self._touch_file(self.memory_file, "# Long-Term Memory\n\n- No detailed facts stored yet.\n")
         self._touch_file(self.history_file, "# Conversation History\n\n")
+        self._touch_file(self.full_history_file, "# Full Agent Interaction Log\n\n")
 
     def _touch_file(self, filepath: Path, default_content=""):
         if not filepath.exists():
@@ -76,9 +78,40 @@ class MemoryStore:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry)
         print(f"[Memory] Logged to history: {role}")
-    
+
+    def append_full_log(self, title: str, data: Any, format_type: str = "json"):
+        """Log data to FULL_HISTORY.md for debugging/audit."""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        
+        content = ""
+        if format_type == "json":
+            # Try to pretty print JSON/Dicts
+            if isinstance(data, (dict, list)):
+                try:
+                    import json
+                    content = json.dumps(data, indent=2, default=str)
+                except:
+                    content = str(data)
+            else:
+                content = str(data)
+            entry = f"\n## [{timestamp}] {title}\n```json\n{content}\n```\n"
+
+        elif format_type == "markdown":
+            content = str(data)
+            entry = f"\n## [{timestamp}] {title}\n\n{content}\n"
+            
+        else:
+             content = str(data)
+             entry = f"\n## [{timestamp}] {title}\n\n{content}\n"
+        
+        try:
+            with open(self.full_history_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except Exception as e:
+            print(f"[Memory] Error logging to full history: {e}")
+
     def get_memory_context(self) -> str:
         """Compose a prompt section with memory."""
         long_term = self.load_long_term()
         # Optionally could add recent history here if needed
-        return f"\n\n## Long-Term Memory\n{long_term}\n"
+        return f"\n{long_term}\n"

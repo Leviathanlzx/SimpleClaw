@@ -6,9 +6,8 @@ The Agent Loop:
 4. If Tool Call -> Execute Tool -> Loop Back to LLM.
 5. If Final Answer -> Publish OutboundMessage.
 """
-import asyncio
 import json
-from bus import MessageBus, InboundMessage, OutboundMessage
+from bus import MessageBus, OutboundMessage
 from provider import LLMProvider
 from memory import MemoryStore
 from skills import SkillsLoader
@@ -23,6 +22,8 @@ class AgentLoop:
         self.skills = skills
         self.system_prompt = config.get("agent.system_prompt", "You are a helpful AI assistant.")
         self.history = []  # Short-term conversation context
+        self._last_sys_prompt = None # Track last logged system prompt
+        self._last_tool_defs = None # Track last logged tool definitions
 
     async def run(self):
         print("[Agent] Started thinking loop...")
@@ -31,16 +32,36 @@ class AgentLoop:
             msg = await self.bus.consume_inbound()
             print(f"[Agent] Received from {msg.channel}: {msg.content}")
 
-            # 2. Update Context
+            # --- LOGGING CONTEXT (Before User) ---
+            # 2a. System Prompt
+            sys_prompt = self._build_system_context()
+            if sys_prompt != self._last_sys_prompt:
+                self.memory.append_full_log("SYSTEM CHANGED", sys_prompt, format_type="markdown")
+                self._last_sys_prompt = sys_prompt
+
+            # 2b. Tools
+            tool_defs = self.tools.get_definitions()
+            tool_defs_str = json.dumps(tool_defs, sort_keys=True)
+            if tool_defs_str != self._last_tool_defs:
+                self.memory.append_full_log("TOOLS AVAILABLE", tool_defs, format_type="json")
+                self._last_tool_defs = tool_defs_str
+
+            # 2c. Log User Message to Full History
+            self.memory.append_full_log("USER", msg.content, format_type="markdown")
+
+            # 3. Update Conversation History
             self.history.append({"role": "user", "content": msg.content})
             self.memory.append_history("user", msg.content)
+            
+            # 4. Think & Act Loop
+            final_response = await self._think_and_act(sys_prompt)
 
-            # 3. Think & Act Loop
-            final_response = await self._think_and_act()
-
-            # 4. Respond (Egress)
+            # 5. Respond (Egress)
             self.history.append({"role": "assistant", "content": final_response})
             self.memory.append_history("assistant", final_response)
+            
+            # Log Assistant Response to Full History
+            self.memory.append_full_log("ASSISTANT", final_response, format_type="markdown")
             
             out_msg = OutboundMessage(
                 channel=msg.channel,
@@ -49,14 +70,50 @@ class AgentLoop:
             )
             await self.bus.publish_outbound(out_msg)
 
-    async def _think_and_act(self):
+    async def _think_and_act(self, sys_prompt: str):
         """
         The inner loop: LLM -> Tool -> LLM ... -> Final Answer
         """
-        for _ in range(5):  # Max iterations
+
+        for i in range(5):  # Max iterations
             # Construct messages with Memory and Skills context
-            messages = [{"role": "system", "content": self._build_system_context()}]
+            messages = [{"role": "system", "content": sys_prompt}]
             messages.extend(self.history[-10:])
+
+            # --- Log the exact request context sent to LLM ---
+            # We filter/format purely for logging visibility
+            log_messages = []
+            for m in messages:
+                if isinstance(m, dict) and m.get("role") == "system":
+                    # Don't spam the full system prompt every time
+                    log_messages.append({"role": "system", "content": "(See SYSTEM CHANGED log for full content)"})
+                    continue
+                
+                # Convert partial objects (like OpenAI Message objects) to dict for readability
+                if hasattr(m, 'tool_calls'):
+                    msg_dict = {"role": "assistant"}
+                    if getattr(m, 'content', None):
+                         msg_dict["content"] = m.content
+                    tc_list = getattr(m, 'tool_calls', [])
+                    if tc_list:
+                        msg_dict["tool_calls"] = []
+                        for tc in tc_list:
+                            # Handle wrapped objects
+                            fn = getattr(tc, 'function', None)
+                            if fn:
+                                msg_dict["tool_calls"].append({
+                                    "id": getattr(tc, 'id', None),
+                                    "type": "function",
+                                    "function": {
+                                        "name": getattr(fn, 'name', None),
+                                        "arguments": getattr(fn, 'arguments', None)
+                                    }
+                                })
+                    log_messages.append(msg_dict)
+                else:
+                    log_messages.append(m)
+            
+            self.memory.append_full_log(f"LLM REQUEST (Step {i+1})", log_messages, format_type="json")
 
             # Call LLM
             response = await self.provider.chat(messages, self.tools.get_definitions())
@@ -87,7 +144,21 @@ class AgentLoop:
                         args = {}
                     
                     print(f"[Agent] Calling tool: {func_name}")
+                    
+                    # Log Tool Call - Full Raw JSON structure as agent sees it
+                    raw_tool_call = {
+                        "name": func_name,
+                        "arguments": args_str # Keep original string or object
+                    }
+                    if hasattr(tool_call, 'id'):
+                        raw_tool_call["id"] = tool_call.id
+                    
+                    self.memory.append_full_log(f"TOOL_CALL: {func_name}", raw_tool_call, format_type="json")
+
                     result = await self.tools.execute(func_name, args)
+
+                    # Log Tool Output
+                    self.memory.append_full_log(f"TOOL_OUTPUT: {func_name}", result, format_type="markdown")
 
                     # Add result to history
                     self.history.append({
@@ -100,8 +171,9 @@ class AgentLoop:
                 continue
 
             # Final Answer
-            return getattr(response, 'content', "") or "Done."
-        
+            content = getattr(response, 'content', "") or "Done."
+            return content
+
         return "Thinking loop limit reached."
 
     def _build_system_context(self):

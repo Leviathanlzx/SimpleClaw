@@ -66,6 +66,15 @@ class Config:
         # Copy builtin skills from nanobot/skills if available
         if NANOBOT_SKILLS_DIR.exists():
             print(f"[Config] Importing builtin skills from {NANOBOT_SKILLS_DIR}...")
+            
+            # Copy skills root README.md (Overview)
+            readme_path = NANOBOT_SKILLS_DIR / "README.md"
+            dest_readme = WORKSPACE_DIR / "skills" / "README.md"
+            if readme_path.exists():
+                if not dest_readme.exists():
+                    shutil.copy2(readme_path, dest_readme)
+                    print("[Config] Imported skills overview: README.md")
+            
             for skill_path in NANOBOT_SKILLS_DIR.iterdir():
                 if skill_path.is_dir():
                     skill_name = skill_path.name
@@ -78,12 +87,27 @@ class Config:
                         if not dest_skill_dir.exists():
                             dest_skill_dir.mkdir(parents=True)
                             shutil.copy2(source_skill_file, dest_skill_file)
+                            
+                            # Copy README.md as well if exists
+                            source_readme_file = skill_path / "README.md"
+                            if source_readme_file.exists():
+                                dest_readme_file = dest_skill_dir / "README.md"
+                                shutil.copy2(source_readme_file, dest_readme_file)
+                                
                             print(f"[Config] Imported skill: {skill_name}")
                         else:
                             # If file missing but dir exists
                             if not dest_skill_file.exists():
                                 shutil.copy2(source_skill_file, dest_skill_file)
                                 print(f"[Config] Restored missing skill file: {skill_name}")
+                            
+                            # Ensure README.md is present if source has it
+                            source_readme_file = skill_path / "README.md"
+                            if source_readme_file.exists():
+                                dest_readme_file = dest_skill_dir / "README.md"
+                                if not dest_readme_file.exists():
+                                    shutil.copy2(source_readme_file, dest_readme_file)
+                                    print(f"[Config] Restored missing readme file: {skill_name}")
 
         # 4. Create standard markdown context files
         for filename, content in DEFAULT_MD_FILES.items():

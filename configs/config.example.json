@@ -6,7 +6,7 @@
         "base_url": "https://openrouter.ai/api/v1"
     },
     "agent": {
-        "name": "Nanobot-Lite",
+        "name": "SimpleClaw",
         "system_prompt": "You are a helpful AI assistant."
     },
     "cron": {
