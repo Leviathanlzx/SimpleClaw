@@ -1,5 +1,10 @@
 # SimpleClaw
-A simplified, easy-to-understand version of OpenClaw, aim for light use and educational demonstrations.
+A simplified, easy-to-understand version of OpenClaw aim for light use and learning.
+
+This build is derived from and inspired by the following independent projects:
+
+* **[OpenClaw](https://github.com/OpenClaw/OpenClaw)**: The open-source AI assistant and automation platform.
+* **[Nanobot](https://github.com/HKUDS/nanobot)**: The modular execution engine that serves as the technical backbone for this simplified version.
 
 ## Setup with uv
 
