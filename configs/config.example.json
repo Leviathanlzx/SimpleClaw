@@ -1,0 +1,22 @@
+{
+    "llm": {
+        "provider": "openrouter",
+        "api_key": "YOUR_OPENROUTER_KEY",
+        "model": "openai/gpt-3.5-turbo",
+        "base_url": "https://openrouter.ai/api/v1"
+    },
+    "agent": {
+        "name": "Nanobot-Lite",
+        "system_prompt": "You are a helpful AI assistant."
+    },
+    "cron": {
+        "tasks": [
+            {
+                "schedule": "0 8 * * *",
+                "command": "say_good_morning",
+                "description": "Say good morning at 8am"
+            }
+        ]
+    }
+}
+

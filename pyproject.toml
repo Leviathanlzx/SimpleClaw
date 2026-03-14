@@ -1,0 +1,14 @@
+[project]
+name = "simpleclaw"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Vincent Liu", email = "zhuoxinliu01@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "croniter>=6.0.0",
+    "openai>=2.28.0",
+]
+
