@@ -203,3 +203,4 @@ cython_debug/
 workspace/
 configs/config.json
 *.log
+.idea
