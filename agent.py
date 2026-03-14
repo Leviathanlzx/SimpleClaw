@@ -75,45 +75,30 @@ class AgentLoop:
         The inner loop: LLM -> Tool -> LLM ... -> Final Answer
         """
 
-        for i in range(5):  # Max iterations
+        def _to_assistant_tool_call_message(resp):
+            """Convert provider response to a canonical assistant tool_call message for logging."""
+            msg_dict = {"role": "assistant", "tool_calls": []}
+            if getattr(resp, 'content', None):
+                msg_dict["content"] = resp.content
+
+            for tc in getattr(resp, 'tool_calls', []):
+                fn = getattr(tc, 'function', None)
+                if not fn:
+                    continue
+                msg_dict["tool_calls"].append({
+                    "id": getattr(tc, 'id', None),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(fn, 'name', None),
+                        "arguments": getattr(fn, 'arguments', None)
+                    }
+                })
+            return msg_dict
+
+        for _ in range(5):  # Max iterations
             # Construct messages with Memory and Skills context
             messages = [{"role": "system", "content": sys_prompt}]
             messages.extend(self.history[-10:])
-
-            # --- Log the exact request context sent to LLM ---
-            # We filter/format purely for logging visibility
-            log_messages = []
-            for m in messages:
-                if isinstance(m, dict) and m.get("role") == "system":
-                    # Don't spam the full system prompt every time
-                    log_messages.append({"role": "system", "content": "(See SYSTEM CHANGED log for full content)"})
-                    continue
-                
-                # Convert partial objects (like OpenAI Message objects) to dict for readability
-                if hasattr(m, 'tool_calls'):
-                    msg_dict = {"role": "assistant"}
-                    if getattr(m, 'content', None):
-                         msg_dict["content"] = m.content
-                    tc_list = getattr(m, 'tool_calls', [])
-                    if tc_list:
-                        msg_dict["tool_calls"] = []
-                        for tc in tc_list:
-                            # Handle wrapped objects
-                            fn = getattr(tc, 'function', None)
-                            if fn:
-                                msg_dict["tool_calls"].append({
-                                    "id": getattr(tc, 'id', None),
-                                    "type": "function",
-                                    "function": {
-                                        "name": getattr(fn, 'name', None),
-                                        "arguments": getattr(fn, 'arguments', None)
-                                    }
-                                })
-                    log_messages.append(msg_dict)
-                else:
-                    log_messages.append(m)
-            
-            self.memory.append_full_log(f"LLM REQUEST (Step {i+1})", log_messages, format_type="json")
 
             # Call LLM
             response = await self.provider.chat(messages, self.tools.get_definitions())
@@ -126,6 +111,10 @@ class AgentLoop:
                 # We need to serialize tool_calls properly for history if using real API
                 # For simplified demo, we just append the object if provider supports it, or dict
                 self.history.append(response)
+
+                # Log only the newly added assistant call message (no repeated request snapshots)
+                assistant_call_msg = _to_assistant_tool_call_message(response)
+                self.memory.append_full_log("ASSISTANT_CALL", assistant_call_msg, format_type="json")
 
                 for tool_call in tool_calls:
                     # Handle both object (OpenAI) and dict (Mock)
@@ -144,29 +133,20 @@ class AgentLoop:
                         args = {}
                     
                     print(f"[Agent] Calling tool: {func_name}")
-                    
-                    # Log Tool Call - Full Raw JSON structure as agent sees it
-                    raw_tool_call = {
-                        "name": func_name,
-                        "arguments": args_str # Keep original string or object
-                    }
-                    if hasattr(tool_call, 'id'):
-                        raw_tool_call["id"] = tool_call.id
-                    
-                    self.memory.append_full_log(f"TOOL_CALL: {func_name}", raw_tool_call, format_type="json")
 
                     result = await self.tools.execute(func_name, args)
 
-                    # Log Tool Output
-                    self.memory.append_full_log(f"TOOL_OUTPUT: {func_name}", result, format_type="markdown")
-
                     # Add result to history
-                    self.history.append({
+                    tool_message = {
                         "role": "tool",
                         "tool_call_id": call_id,
                         "name": func_name,
                         "content": str(result)
-                    })
+                    }
+                    self.history.append(tool_message)
+
+                    # Log only the newly added tool message object
+                    self.memory.append_full_log("TOOL", tool_message, format_type="json")
                 
                 continue
 
