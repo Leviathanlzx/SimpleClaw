@@ -2,7 +2,39 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Dict
+from dataclasses import dataclass, field
+
+@dataclass
+class LLMConfig:
+    provider: str = "openrouter"
+    api_key: str = "YOUR_OPENROUTER_KEY"
+    model: str = "openai/gpt-3.5-turbo"
+    base_url: str = "https://openrouter.ai/api/v1"
+
+@dataclass
+class AgentConfig:
+    name: str = "SimpleClaw"
+    system_prompt: str = "You are a helpful AI assistant."
+    max_loops: int = 10
+
+@dataclass
+class CronTaskConfig:
+    schedule: str = "0 8 * * *"
+    command: str = "say_good_morning"
+    description: str = "Say good morning at 8am"
+
+@dataclass
+class CronConfig:
+    tasks: List[Dict[str, str]] = field(default_factory=lambda: [
+        {"schedule": "0 8 * * *", "command": "say_good_morning", "description": "Say good morning at 8am"}
+    ])
+
+@dataclass
+class AppConfig:
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    cron: CronConfig = field(default_factory=CronConfig)
 
 # Detect project root (one level up from core/config.py)
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -38,11 +70,10 @@ DEFAULT_MD_FILES = {
     "HEARTBEAT.md": "# System Status\nStatus: Active\nMode: Reactive\n"
 }
 
-class Config:
+class ConfigLoader:
     def __init__(self):
-        self._data = {}
         self.ensure_paths()
-        self.load()
+        self.config = self.load()
 
     def ensure_paths(self):
         """Ensure configs and workspace directories exist."""
@@ -156,30 +187,35 @@ class Config:
         
         print(f"[Config] Initialization complete.")
 
-    def load(self):
-        """Load configuration from JSON file."""
+    def load(self) -> AppConfig:
+        """Load configuration from JSON file and parse into Dataclasses."""
+        data = {}
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    self._data = json.load(f)
+                    data = json.load(f)
                 print(f"[Config] Loaded configuration from {CONFIG_FILE}")
             except Exception as e:
                 print(f"[Config] Error loading config: {e}")
-                self._data = DEFAULT_CONFIG
+                data = DEFAULT_CONFIG
         else:
-            self._data = DEFAULT_CONFIG
+            data = DEFAULT_CONFIG
             
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get a config value by dot.notation string (e.g., 'llm.api_key')."""
-        keys = key.split('.')
-        value = self._data
-        try:
-            for k in keys:
-                value = value[k]
-            return value
-        except (KeyError, TypeError):
-            return default
+        # Parse into objects safely
+        llm_data = data.get("llm", {})
+        agent_data = data.get("agent", {})
+        cron_data = data.get("cron", {})
+        
+        # Filter valid keys for dataclasses
+        llm_kwargs = {k: v for k, v in llm_data.items() if hasattr(LLMConfig, k)}
+        agent_kwargs = {k: v for k, v in agent_data.items() if hasattr(AgentConfig, k)}
+        
+        return AppConfig(
+            llm=LLMConfig(**llm_kwargs),
+            agent=AgentConfig(**agent_kwargs),
+            cron=CronConfig(tasks=cron_data.get("tasks", []))
+        )
 
 # Global instance for easy access
-config = Config()
+config = ConfigLoader().config
 

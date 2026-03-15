@@ -23,13 +23,13 @@ async def main():
     
     # 2. Setup Provider
     # Check config for keys, fallback to mock if missing
-    api_key = config.get("llm.api_key")
+    api_key = config.llm.api_key
     if api_key and api_key != "YOUR_OPENROUTER_KEY":
         print(f"[Main] Using OpenRouter Provider...")
         provider = OpenAIProvider(
             api_key=api_key,
-            base_url=config.get("llm.base_url"),
-            model=config.get("llm.model")
+            base_url=config.llm.base_url,
+            model=config.llm.model
         )
     else:
         print(f"[Main] API Key missing/default. Using MockProvider.")
@@ -43,7 +43,7 @@ async def main():
     cli_channel = CLIChannel(bus)
 
     # 5. Cron Service
-    cron_tasks = config.get("cron.tasks", [])
+    cron_tasks = config.cron.tasks
     cron_service = CronService(bus, cron_tasks)
 
     # 6. Start Services

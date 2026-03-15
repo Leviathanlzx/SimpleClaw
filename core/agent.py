@@ -15,57 +15,9 @@ from pathlib import Path
 
 from .bus import MessageBus, OutboundMessage
 from .provider import LLMProvider
-from .memory import MemoryStore, _estimate_tokens, _estimate_message_tokens
+from .memory import MemoryStore, Session, _estimate_tokens, _estimate_message_tokens
 from .skills import SkillsLoader
 from .config import config, WORKSPACE_DIR
-
-
-# ─────────────────────────────────────────
-# Session：持久化的对话历史（本次升级的核心数据结构）
-# ─────────────────────────────────────────
-
-@dataclass
-class Session:
-    """
-    持久化会话对象。
-
-    设计原则（与官方相同）：
-      - messages 只追加，永不删除（对 LLM 缓存友好）
-      - last_consolidated 游标记录已被整合进文件的消息数量
-      - get_history() 只返回 messages[last_consolidated:]（未整合部分）
-      - 整合完成后推进 last_consolidated（旧消息不再进入 LLM context）
-    """
-    key: str
-    messages: list = field(default_factory=list)
-    last_consolidated: int = 0  # 游标：已整合的消息数量
-
-    def add_message(self, role: str, content: str, **extra):
-        """追加一条消息（带时间戳）。"""
-        msg = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.datetime.now().isoformat(),
-            **extra
-        }
-        self.messages.append(msg)
-
-    def get_history(self) -> list:
-        """
-        返回未整合的消息（用于拼入 LLM messages）。
-        从 last_consolidated 处开始，并保证从 user 轮开头起。
-        """
-        unconsolidated = self.messages[self.last_consolidated:]
-
-        # 必须从 user 消消息开始，防止出现孤立的 tool_result 块
-        for i, m in enumerate(unconsolidated):
-            if m.get("role") == "user":
-                return unconsolidated[i:]
-        return []
-
-    def estimate_tokens(self) -> int:
-        """粗略估算当前未整合历史的 token 数。"""
-        return sum(_estimate_message_tokens(m) for m in self.get_history())
-
 
 # ─────────────────────────────────────────
 # AgentLoop：主循环（已升级记忆整合）
@@ -86,7 +38,7 @@ class AgentLoop:
         self.tools = tools
         self.memory = memory
         self.skills = skills
-        self.system_prompt = config.get("agent.system_prompt", "You are a helpful AI assistant.")
+        self.system_prompt = config.agent.system_prompt
 
         # 升级：单一 Session（对应 CLI 单通道）
         # 如果未来支持多通道，每个 channel:chat_id 独立一个 Session
@@ -283,7 +235,7 @@ class AgentLoop:
         # 本轮产生的新消息（用于回存到 Session）
         new_messages = []
 
-        max_loops = config.get("agent.max_loops", 10)
+        max_loops = config.agent.max_loops
         for _ in range(max_loops):  # 最大迭代次数，从配置读取
             # 构造发给 LLM 的消息列表
             messages = [{"role": "system", "content": sys_prompt}]
