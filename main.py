@@ -1,14 +1,14 @@
 import asyncio
 import os
-from bus import MessageBus
-from channels import CLIChannel
-from provider import OpenAIProvider, MockProvider
-from tools import setup_tools
-from agent import AgentLoop
-from config import config, WORKSPACE_DIR
-from memory import MemoryStore
-from skills import SkillsLoader
-from cron import CronService
+from core.bus import MessageBus
+from core.channels import CLIChannel
+from core.provider import OpenAIProvider, MockProvider
+from core.tools import setup_tools
+from core.agent import AgentLoop
+from core.config import config, WORKSPACE_DIR
+from core.memory import MemoryStore
+from core.skills import SkillsLoader
+from core.cron import CronService
 
 async def main():
     print("=== Nanobot Light Architecture Demo ===")

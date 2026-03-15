@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from abc import ABC, abstractmethod
-from bus import MessageBus, InboundMessage, OutboundMessage
+from .bus import MessageBus, InboundMessage, OutboundMessage
 
 class BaseChannel(ABC):
     def __init__(self, bus: MessageBus):

@@ -30,7 +30,7 @@ class CronService:
                     print(f"[Cron] Triggering task: {command_name} ({task.get('description', '')})")
                     # Send an internal message to trigger the agent
                     # For simplicity, we inject it into the inbound queue as a system event
-                    from bus import InboundMessage
+                    from .bus import InboundMessage
                     await self.bus.publish_inbound(InboundMessage(
                         channel="cron",
                         chat_id="system",

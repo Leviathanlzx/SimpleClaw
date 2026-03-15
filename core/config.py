@@ -4,8 +4,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-# Detect project root (two levels up from architecture/config.py)
-PROJECT_ROOT = Path(__file__).parent.resolve()
+# Detect project root (one level up from core/config.py)
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 CONFIG_DIR = PROJECT_ROOT / "configs"
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
 CONFIG_FILE = CONFIG_DIR / "config.json"

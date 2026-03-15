@@ -3,8 +3,8 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
-from memory import MemoryStore
-from config import WORKSPACE_DIR
+from .memory import MemoryStore
+from .config import WORKSPACE_DIR
 
 class ToolRegistry:
     """
