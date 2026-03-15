@@ -204,3 +204,5 @@ workspace/
 configs/config.json
 *.log
 .idea
+
+reference/
