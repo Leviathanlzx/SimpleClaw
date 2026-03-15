@@ -7,7 +7,8 @@
     },
     "agent": {
         "name": "SimpleClaw",
-        "system_prompt": "You are a helpful AI assistant."
+        "system_prompt": "You are a helpful AI assistant.",
+        "max_loops": 10
     },
     "cron": {
         "tasks": [
@@ -19,4 +20,3 @@
         ]
     }
 }
-

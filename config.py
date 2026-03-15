@@ -20,7 +20,8 @@ DEFAULT_CONFIG = {
     },
     "agent": {
         "name": "Nanobot-Lite",
-        "system_prompt": "You are a helpful AI assistant."
+        "system_prompt": "You are a helpful AI assistant.",
+        "max_loops": 10
     },
     "cron": {
         "tasks": [
@@ -61,6 +62,36 @@ class Config:
         (WORKSPACE_DIR / "memory").mkdir(exist_ok=True)
         (WORKSPACE_DIR / "history").mkdir(exist_ok=True)
         (WORKSPACE_DIR / "skills").mkdir(exist_ok=True)
+
+        # 2.5 Apply Template (New)
+        TEMPLATE_DIR = PROJECT_ROOT / "template"
+        if TEMPLATE_DIR.exists():
+            print(f"[Config] Applying template from {TEMPLATE_DIR}...")
+            for item in TEMPLATE_DIR.iterdir():
+                dest = WORKSPACE_DIR / item.name
+                try:
+                    if item.is_dir():
+                        # If directory exists (like skills), merge contents
+                        if not dest.exists():
+                            shutil.copytree(item, dest)
+                            print(f"[Config] Copied template directory: {item.name}")
+                        else:
+                            # Merge: copy missing items from template subdir
+                            for subitem in item.iterdir():
+                                subdest = dest / subitem.name
+                                if not subdest.exists():
+                                    if subitem.is_dir():
+                                        shutil.copytree(subitem, subdest)
+                                    else:
+                                        shutil.copy2(subitem, subdest)
+                                    print(f"[Config] Merged template item: {item.name}/{subitem.name}")
+                    else:
+                        # File
+                        if not dest.exists():
+                            shutil.copy2(item, dest)
+                            print(f"[Config] Copied template file: {item.name}")
+                except Exception as e:
+                    print(f"[Config] Error copying template item {item.name}: {e}")
 
         # 3. Import Skills
         # Copy builtin skills from nanobot/skills if available

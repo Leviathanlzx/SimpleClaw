@@ -193,11 +193,12 @@ def setup_tools(memory: MemoryStore = None) -> ToolRegistry:
         registry.register(
             "save_memory", 
             _save_memory_impl, 
-            "Update long-term memory with consolidated facts. COMPLETELY OVERWRITES existing memory.",
+            "Update long-term memory with consolidated facts. COMPLETELY OVERWRITES existing memory. "
+            "IMPORTANT: Content MUST adhere to the strict Markdown structure (User Information, Preferences, Project Context, Important Notes).",
             parameters={
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "The full content of the memory file."},
+                    "content": {"type": "string", "description": "The full content of the memory file with all required headers."},
                 },
                 "required": ["content"],
             },
