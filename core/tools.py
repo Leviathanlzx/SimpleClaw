@@ -2,6 +2,7 @@ from datetime import datetime
 import asyncio
 import os
 import subprocess
+import inspect
 from pathlib import Path
 from .memory import MemoryStore
 from .config import WORKSPACE_DIR
@@ -36,10 +37,21 @@ class ToolRegistry:
         if name not in self._tools:
             return f"Error: Tool '{name}' not found"
         func = self._tools[name]["func"]
+        
+        # Filter kwargs to only what the function accepts and exclude unexpected keys
+        sig = inspect.signature(func)
+        valid_params = set(sig.parameters.keys())
+        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        
+        if has_kwargs:
+            filtered_args = args
+        else:
+            filtered_args = {k: v for k, v in args.items() if k in valid_params}
+
         try:
             if asyncio.iscoroutinefunction(func):
-                return str(await func(**args))
-            return str(func(**args))
+                return str(await func(**filtered_args))
+            return str(func(**filtered_args))
         except Exception as e:
             return f"Error executing {name}: {e}"
 
