@@ -51,19 +51,27 @@ def get_time():
 async def exec_shell(command: str):
     """Execute a shell command."""
     try:
+        # Force UTF-8 on Windows by setting code page 65001 and env vars
+        env = os.environ.copy()
+        if os.name == "nt":
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            actual_command = f"chcp 65001 > nul 2>&1 & {command}"
+        else:
+            actual_command = command
+
         # Use asyncio subprocess for non-blocking execution
         process = await asyncio.create_subprocess_shell(
-            command,
+            actual_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(WORKSPACE_DIR) # Default to workspace for safety
+            cwd=str(WORKSPACE_DIR),  # Default to workspace for safety
+            env=env,
         )
         stdout, stderr = await process.communicate()
 
-        # Windows shells default to GBK; fall back gracefully if decoding fails
-        enc = "gbk" if os.name == "nt" else "utf-8"
-        output = stdout.decode(enc, errors="replace").strip()
-        error = stderr.decode(enc, errors="replace").strip()
+        output = stdout.decode("utf-8", errors="replace").strip()
+        error = stderr.decode("utf-8", errors="replace").strip()
         
         if error:
             return f"Stdout:\n{output}\n\nStderr:\n{error}"
