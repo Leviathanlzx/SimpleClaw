@@ -31,17 +31,30 @@ class CronConfig:
     ])
 
 @dataclass
+class HeartbeatConfig:
+    enabled: bool = True
+    interval_s: int = 1800  # 30 minutes
+
+@dataclass
+class TelegramConfig:
+    enabled: bool = False
+    token: str = ""
+    allowed_user_ids: List[int] = field(default_factory=list)  # 空列表 = 接受所有用户
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     cron: CronConfig = field(default_factory=CronConfig)
+    heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
 # Detect project root (one level up from core/config.py)
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 CONFIG_DIR = PROJECT_ROOT / "configs"
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-NANOBOT_SKILLS_DIR = PROJECT_ROOT / "skills"
+SIMPLECLAW_SKILLS_DIR = PROJECT_ROOT / "skills"
 
 DEFAULT_CONFIG = {
     "llm": {
@@ -51,7 +64,7 @@ DEFAULT_CONFIG = {
         "base_url": "https://openrouter.ai/api/v1"
     },
     "agent": {
-        "name": "Nanobot-Lite",
+        "name": "SimpleClaw",
         "system_prompt": "You are a helpful AI assistant.",
         "max_loops": 10
     },
@@ -59,15 +72,33 @@ DEFAULT_CONFIG = {
         "tasks": [
             {"schedule": "0 8 * * *", "command": "say_good_morning", "description": "Say good morning at 8am"}
         ]
+    },
+    "heartbeat": {
+        "enabled": True,
+        "interval_s": 1800
+    },
+    "telegram": {
+        "enabled": False,
+        "token": "",
+        "allowed_user_ids": []
     }
 }
 
 DEFAULT_MD_FILES = {
-    "SOUL.md": "# Identity & Soul\nYou are Nanobot, a highly capable AI assistant tailored for efficiency and precision.\nYour core personality is helpful, direct, and slightly witty.\n",
+    "SOUL.md": "# Identity & Soul\nYou are SimpleClaw, a highly capable AI assistant tailored for efficiency and precision.\nYour core personality is helpful, direct, and slightly witty.\n",
     "USER.md": "# User Context\nUser Name: Commander\nPreferences: Likes concise answers with code examples.\n",
     "TOOLS.md": "# Tools Strategy\n- Use tools whenever you need to retrieve external information.\n- If a tool fails, try to analyze the error before giving up.\n",
     "AGENTS.md": "# Sub-Agents Registry\n- Plan: Specialized in creating multi-step plans.\n",
-    "HEARTBEAT.md": "# System Status\nStatus: Active\nMode: Reactive\n"
+    "HEARTBEAT.md": (
+        "# Heartbeat Tasks\n\n"
+        "This file is checked periodically by SimpleClaw.\n"
+        "Add tasks below that you want the agent to work on in the background.\n\n"
+        "If this file has no active tasks, the agent will skip the heartbeat.\n\n"
+        "## Active Tasks\n\n"
+        "<!-- Add your periodic tasks below this line -->\n\n\n"
+        "## Completed\n\n"
+        "<!-- Move completed tasks here or delete them -->\n"
+    )
 }
 
 class ConfigLoader:
@@ -125,19 +156,19 @@ class ConfigLoader:
                     print(f"[Config] Error copying template item {item.name}: {e}")
 
         # 3. Import Skills
-        # Copy builtin skills from nanobot/skills if available
-        if NANOBOT_SKILLS_DIR.exists():
-            print(f"[Config] Importing builtin skills from {NANOBOT_SKILLS_DIR}...")
+        # Copy builtin skills from simpleclaw/skills if available
+        if SIMPLECLAW_SKILLS_DIR.exists():
+            print(f"[Config] Importing builtin skills from {SIMPLECLAW_SKILLS_DIR}...")
             
             # Copy skills root README.md (Overview)
-            readme_path = NANOBOT_SKILLS_DIR / "README.md"
+            readme_path = SIMPLECLAW_SKILLS_DIR / "README.md"
             dest_readme = WORKSPACE_DIR / "skills" / "README.md"
             if readme_path.exists():
                 if not dest_readme.exists():
                     shutil.copy2(readme_path, dest_readme)
                     print("[Config] Imported skills overview: README.md")
             
-            for skill_path in NANOBOT_SKILLS_DIR.iterdir():
+            for skill_path in SIMPLECLAW_SKILLS_DIR.iterdir():
                 if skill_path.is_dir():
                     skill_name = skill_path.name
                     source_skill_file = skill_path / "SKILL.md"
@@ -205,15 +236,21 @@ class ConfigLoader:
         llm_data = data.get("llm", {})
         agent_data = data.get("agent", {})
         cron_data = data.get("cron", {})
-        
+        heartbeat_data = data.get("heartbeat", {})
+        telegram_data = data.get("telegram", {})
+
         # Filter valid keys for dataclasses
         llm_kwargs = {k: v for k, v in llm_data.items() if hasattr(LLMConfig, k)}
         agent_kwargs = {k: v for k, v in agent_data.items() if hasattr(AgentConfig, k)}
-        
+        heartbeat_kwargs = {k: v for k, v in heartbeat_data.items() if hasattr(HeartbeatConfig, k)}
+        telegram_kwargs = {k: v for k, v in telegram_data.items() if hasattr(TelegramConfig, k)}
+
         return AppConfig(
             llm=LLMConfig(**llm_kwargs),
             agent=AgentConfig(**agent_kwargs),
-            cron=CronConfig(tasks=cron_data.get("tasks", []))
+            cron=CronConfig(tasks=cron_data.get("tasks", [])),
+            heartbeat=HeartbeatConfig(**heartbeat_kwargs),
+            telegram=TelegramConfig(**telegram_kwargs),
         )
 
 # Global instance for easy access

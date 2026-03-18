@@ -9,9 +9,11 @@ from core.config import config, WORKSPACE_DIR
 from core.memory import MemoryStore
 from core.skills import SkillsLoader
 from core.cron import CronService
+from core.heartbeat import HeartbeatService
+from core.telegram_channel import TelegramChannel
 
 async def main():
-    print("=== Nanobot Light Architecture Demo ===")
+    print("=== SimpleClaw ===")
     
     # 0. Initialize Infrastructure
     bus = MessageBus()
@@ -46,26 +48,56 @@ async def main():
     cron_tasks = config.cron.tasks
     cron_service = CronService(bus, cron_tasks)
 
-    # 6. Start Services
-    await asyncio.gather(
-        agent.run(),                        # Logic Consumer
-        cli_channel.start(),                # Input Producer
-        _channel_dispatcher(bus, cli_channel), # Output Consumer
-        cron_service.start()                # Timer Producer
+    # 6. Heartbeat Service
+    heartbeat_service = HeartbeatService(
+        workspace=WORKSPACE_DIR,
+        provider=provider,
+        bus=bus,
+        interval_s=config.heartbeat.interval_s,
+        enabled=config.heartbeat.enabled,
     )
 
-async def _channel_dispatcher(bus, cli_channel):
+    # 7. Telegram Channel (optional, enabled via config)
+    tg_cfg = config.telegram
+    telegram_channel = TelegramChannel(
+        token=tg_cfg.token,
+        bus=bus,
+        allowed_user_ids=tg_cfg.allowed_user_ids,
+    ) if tg_cfg.enabled else None
+
+    if telegram_channel:
+        print("[Main] Telegram channel enabled.")
+
+    # 8. Start Services
+    services = [
+        agent.run(),                           # Logic Consumer
+        cli_channel.start(),                   # Input Producer
+        _channel_dispatcher(bus, cli_channel, telegram_channel),  # Output Consumer
+        cron_service.start(),                  # Timer Producer
+        heartbeat_service.start(),             # Heartbeat Producer
+    ]
+    if telegram_channel:
+        services.append(telegram_channel.start())  # Telegram Inbound Producer
+
+    await asyncio.gather(*services)
+
+async def _channel_dispatcher(bus, cli_channel, telegram_channel=None):
     """
-    Simplified ChannelManager logic for this demo.
-    Routes messages from Bus -> CliChannel.
+    Routes OutboundMessages from Bus -> appropriate Channel.
     """
     while True:
         msg = await bus.consume_outbound()
         if msg.channel == "cli":
             await cli_channel.send(msg)
+        elif msg.channel == "telegram":
+            if telegram_channel:
+                await telegram_channel.send(msg)
+        elif msg.channel == "heartbeat":
+            # Heartbeat responses are printed to CLI with a distinct prefix
+            print(f"\n[Heartbeat] > Agent: {msg.content}\n")
         elif msg.channel == "cron":
-             # Cron messages are usually just triggers, they don't have an outbound destination
-             pass
+            # Cron triggers don't require an outbound response
+            pass
 
 if __name__ == "__main__":
     try:
