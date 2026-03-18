@@ -48,77 +48,53 @@ class SkillsLoader:
         return "", content
 
     def _parse_frontmatter_data(self, frontmatter: str) -> Dict:
-        """Simple YAML-like parsing for frontmatter (key: value)."""
+        """Simple key: value frontmatter parser (no full YAML dependency needed)."""
         data = {}
         if not frontmatter:
             return data
-            
-        current_key = None
         for line in frontmatter.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-                
             if ":" in line:
                 key, value = line.split(":", 1)
-                key = key.strip()
-                value = value.strip()
-                data[key] = value
-                current_key = key
-            # Very basic handling for JSON in metadata or multi-line values could go here
-            # For now we assume simple key: value structure similar to the examples
-            
-        # Specific fix for metadata json string if present
-        if "metadata" in data and data["metadata"].startswith("{"):
-            try:
-                # This is a hacky way to get the full json string if it was on one line
-                # Ideally we'd use a real yaml parser
-                pass
-            except:
-                pass
-                
+                data[key.strip()] = value.strip()
         return data
 
     def get_always_skills_content(self) -> str:
         """Returns the content of skills that should always be loaded."""
         parts = []
         for name, info in self.skills_info.items():
-            # Check for always=true in metadata (parsing json inside metadata field is tricky without proper parser)
-            # For now, let's look for "always" in the string representation or specific names
-            metadata_str = str(info.get("metadata", ""))
-            
-            # Simple heuristic for 'always' or core skills
-            is_always = "always" in metadata_str and "true" in metadata_str.lower()
-            if name in ["memory", "planner"]: # Force specific core skills to be always on
+            # A skill is always-on if its frontmatter has `always: true`,
+            # or if it's one of the known core skills.
+            metadata = info.get("metadata", {})
+            is_always = metadata.get("always", "").lower() == "true"
+            if name in ("memory", "planner"):
                 is_always = True
 
             if is_always:
                 parts.append(f"### Skill: {name}\n\n{info['content']}")
-                
+
         return "\n\n---\n\n".join(parts) if parts else ""
 
     def build_skills_summary(self) -> str:
         """
-        Builds an XML summary of available skills for the Context Window.
-        This forces the LLM to 'read_file' to learn the skill first.
+        Build a Markdown summary of available skills.
+        Each entry shows the skill name, description, and file path.
+        The LLM must call read_file on the path to load full instructions.
         """
         if not self.skills_info:
             return ""
-        
-        lines = ["# Available Skills", 
-                 "The following skills extend your capabilities. To use a skill, you must first read its instructions file using `read_file`.",
-                 "<skills>"]
-                 
+
+        lines = [
+            "# Available Skills",
+            "To use a skill, read its file first with `read_file` to get full instructions.",
+            "",
+        ]
         for name, info in self.skills_info.items():
-            # Skip if it's already loaded in 'always' (optional optimization)
-            # For now list everything in summary so agent knows where to look
-            
-            lines.append(f'  <skill name="{name}">')
-            lines.append(f'    <description>{info["description"]}</description>')
-            lines.append(f'    <location>{info["path"]}</location>')
-            lines.append(f'  </skill>')
-            
-        lines.append("</skills>")
+            lines.append(f"- **{name}** — {info['description']}")
+            lines.append(f"  File: `{info['path']}`")
+
         return "\n".join(lines)
 
     def get_skill_prompts(self) -> str:

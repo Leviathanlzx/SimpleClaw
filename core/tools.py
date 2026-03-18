@@ -32,21 +32,16 @@ class ToolRegistry:
         return definitions
 
     async def execute(self, name: str, args: dict) -> str:
-        if name in self._tools:
-            # Inject dependencies if needed, or just call
-            # Simple simulation:
-            func = self._tools[name]["func"]
-            # Check if func needs 'memory' and it's not provided in args
-            # For this simple demo, we rely on closures or bound methods if state is needed
-            # But here functions are standalone.
-            # We can bind memory if we define them inside setup_tools or use a class.
-            try:
-                if asyncio.iscoroutinefunction(func):
-                    return str(await func(**args))
-                return str(func(**args))
-            except Exception as e:
-                return f"Error executing {name}: {e}"
-        return f"Error: Tool {name} not found"
+        """Execute a registered tool by name with the given arguments."""
+        if name not in self._tools:
+            return f"Error: Tool '{name}' not found"
+        func = self._tools[name]["func"]
+        try:
+            if asyncio.iscoroutinefunction(func):
+                return str(await func(**args))
+            return str(func(**args))
+        except Exception as e:
+            return f"Error executing {name}: {e}"
 
 # --- Tools ---
 
@@ -64,9 +59,11 @@ async def exec_shell(command: str):
             cwd=str(WORKSPACE_DIR) # Default to workspace for safety
         )
         stdout, stderr = await process.communicate()
-        
-        output = stdout.decode().strip()
-        error = stderr.decode().strip()
+
+        # Windows shells default to GBK; fall back gracefully if decoding fails
+        enc = "gbk" if os.name == "nt" else "utf-8"
+        output = stdout.decode(enc, errors="replace").strip()
+        error = stderr.decode(enc, errors="replace").strip()
         
         if error:
             return f"Stdout:\n{output}\n\nStderr:\n{error}"
@@ -119,12 +116,6 @@ def list_dir(path: str = "."):
         return "\n".join(items) if items else "(Empty directory)"
     except Exception as e:
         return f"Error listing directory: {e}"
-
-def save_memory(content: str):
-    """Save important facts to long-term memory."""
-    # We need access to the memory store instance.
-    # We will handle this by closing over the instance in setup_tools
-    return "Memory saved." # Real implementation in setup_tools
 
 def setup_tools(memory: MemoryStore = None) -> ToolRegistry:
     registry = ToolRegistry(memory)

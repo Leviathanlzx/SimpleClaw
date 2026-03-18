@@ -1,7 +1,7 @@
 import asyncio
 import os
 from core.bus import MessageBus
-from core.channels import CLIChannel
+from core.channels import CLIChannel, TelegramChannel
 from core.provider import OpenAIProvider, MockProvider
 from core.tools import setup_tools
 from core.agent import AgentLoop
@@ -10,7 +10,6 @@ from core.memory import MemoryStore
 from core.skills import SkillsLoader
 from core.cron import CronService
 from core.heartbeat import HeartbeatService
-from core.telegram_channel import TelegramChannel
 
 async def main():
     print("=== SimpleClaw ===")

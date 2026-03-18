@@ -1,7 +1,8 @@
 import asyncio
-import time
-from typing import Callable, List, Dict
 import datetime
+from typing import List, Dict
+
+from .bus import InboundMessage
 
 try:
     from croniter import croniter
@@ -28,9 +29,6 @@ class CronService:
                 
                 if self._should_run(i, schedule, now):
                     print(f"[Cron] Triggering task: {command_name} ({task.get('description', '')})")
-                    # Send an internal message to trigger the agent
-                    # For simplicity, we inject it into the inbound queue as a system event
-                    from .bus import InboundMessage
                     await self.bus.publish_inbound(InboundMessage(
                         channel="cron",
                         chat_id="system",
@@ -42,22 +40,11 @@ class CronService:
             # Sleep for a minute to avoid busy loop
             await asyncio.sleep(60)
 
-    def _should_run(self, task_idx, schedule_str, current_dt):
-        """Check if the task should run now based on cron string."""
+    def _should_run(self, task_idx: int, schedule_str: str, current_dt: datetime.datetime) -> bool:
+        """Return True if the cron expression matches the current minute."""
         if not croniter:
-            return False # Fallback logic not implemented for brevity
-            
-        # Proper cron check using croniter
-        # For a simple demo, we just check if the last run + interval < now is too complex without state.
-        # Efficient way: Calculate next run time from last run time.
-        
-        last_run = self._last_run.get(task_idx, current_dt - datetime.timedelta(minutes=1)) # defaulting to allowed
-        iter = croniter(schedule_str, last_run)
-        next_run = iter.get_next(datetime.datetime)
-        
-        # If next run time is in the past or now (within a minute tolerance), run it.
-        # But since we check every minute, we just need to see if we crossed the threshold.
-        # Actually croniter is better used to check if the current time matches the pattern.
+            return False
+        # croniter.match() checks whether current_dt falls on the cron schedule
         return croniter.match(schedule_str, current_dt)
 
     def stop(self):

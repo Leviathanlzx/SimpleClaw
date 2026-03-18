@@ -1,60 +1,78 @@
-import os
+"""Two-layer persistent memory for the agent.
+
+Storage layout (under workspace/):
+  memory/MEMORY.md        — long-term facts (overwritten on each consolidation)
+  history/HISTORY.md      — timestamped consolidation summaries (append-only)
+  history/FULL_HISTORY.md — full debug log of every LLM exchange (append-only)
+
+Memory consolidation (consolidate()):
+  Called by AgentLoop when the session token budget is exceeded.
+  A separate LLM call summarises the old messages into MEMORY.md and HISTORY.md,
+  allowing the agent to forget the raw transcript while retaining key facts.
+"""
 import json
 import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any
 from dataclasses import dataclass, field
 
-# ─────────────────────────────────────────
-# Session：持久化的对话历史（本次升级的核心数据结构）
-# ─────────────────────────────────────────
+
+# ── Session ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class Session:
     """
-    持久化会话对象。
+    In-memory conversation history with a consolidation cursor.
 
-    设计原则（与官方相同）：
-      - messages 只追加，永不删除（对 LLM 缓存友好）
-      - last_consolidated 游标记录已被整合进文件的消息数量
-      - get_history() 只返回 messages[last_consolidated:]（未整合部分）
-      - 整合完成后推进 last_consolidated（旧消息不再进入 LLM context）
+    Design:
+      - messages is append-only (never deleted, friendly to LLM prompt caching)
+      - last_consolidated is a cursor: messages[:cursor] have been summarised
+        into MEMORY.md and are excluded from the active LLM context window
+      - get_history() returns only messages[last_consolidated:], always
+        starting from a user turn to keep conversation structure valid
     """
     key: str
     messages: list = field(default_factory=list)
-    last_consolidated: int = 0  # 游标：已整合的消息数量
+    last_consolidated: int = 0  # index of first un-consolidated message
 
     def add_message(self, role: str, content: str, **extra):
-        """追加一条消息（带时间戳）。"""
-        msg = {
+        """Append a message with the current timestamp."""
+        self.messages.append({
             "role": role,
             "content": content,
             "timestamp": datetime.datetime.now().isoformat(),
-            **extra
-        }
-        self.messages.append(msg)
+            **extra,
+        })
 
     def get_history(self) -> list:
-        """
-        返回未整合的消息（用于拼入 LLM messages）。
-        从 last_consolidated 处开始，并保证从 user 轮开头起。
-        """
+        """Return un-consolidated messages, starting from the first user turn."""
         unconsolidated = self.messages[self.last_consolidated:]
-
-        # 必须从 user 消消息开始，防止出现孤立的 tool_result 块
+        # Always start from a user message to avoid orphaned tool-result blocks
         for i, m in enumerate(unconsolidated):
             if m.get("role") == "user":
                 return unconsolidated[i:]
         return []
 
     def estimate_tokens(self) -> int:
-        """粗略估算当前未整合历史的 token 数。"""
+        """Rough token count for the current active history."""
         return sum(_estimate_message_tokens(m) for m in self.get_history())
 
 
-# ─────────────────────────────────────────
-# 虚拟工具定义：让 LLM 强制返回结构化结果
-# ─────────────────────────────────────────
+# ── Token estimation ───────────────────────────────────────────────────────────
+
+def _estimate_tokens(text: str) -> int:
+    """Approximate: 1 token ≈ 4 characters."""
+    return max(1, len(text) // 4)
+
+def _estimate_message_tokens(msg: dict) -> int:
+    content = msg.get("content", "")
+    return (_estimate_tokens(content) + 4) if isinstance(content, str) else 10
+
+
+# ── Virtual tool for consolidation ────────────────────────────────────────────
+# Passed to the LLM during consolidation to force structured JSON output.
+# Not registered in ToolRegistry — only used internally by consolidate().
+
 _SAVE_MEMORY_TOOL = [
     {
         "type": "function",
@@ -85,31 +103,24 @@ _SAVE_MEMORY_TOOL = [
     }
 ]
 
-# ─────────────────────────────────────────
-# 粗略估算 token 数（字符数 / 4）
-# ─────────────────────────────────────────
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
 
-def _estimate_message_tokens(msg: dict) -> int:
-    content = msg.get("content", "")
-    if isinstance(content, str):
-        return _estimate_tokens(content) + 4  # role + 固定开销
-    return 10  # fallback
-
+# ── MemoryStore ────────────────────────────────────────────────────────────────
 
 class MemoryStore:
     """
-    管理两层持久化记忆：
-      - MEMORY.md  : 长期事实（全量覆写，每次整合更新）
-      - HISTORY.md : 时间线日志（追加，每次整合新增一条）
-      - FULL_HISTORY.md : 完整审计日志（调试用，你的独特功能）
+    Manages the two-layer persistent memory files.
 
-    新增：consolidate() 方法 — LLM 驱动的自动整合
-      触发时机由 AgentLoop 控制（context 超 token 预算时）
+    Public interface:
+      load_long_term()         — read MEMORY.md
+      update_long_term()       — overwrite MEMORY.md
+      append_history_entry()   — append a consolidation summary to HISTORY.md
+      append_history()         — append a raw turn to HISTORY.md
+      append_full_log()        — append a debug entry to FULL_HISTORY.md
+      get_memory_context()     — return MEMORY.md content for the system prompt
+      consolidate()            — LLM-driven consolidation of a message chunk
     """
 
-    # 连续失败多少次后降级为原始归档
+    # Fall back to raw archiving after this many consecutive LLM failures
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
     def __init__(self, workspace: Path):
@@ -118,146 +129,103 @@ class MemoryStore:
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.history_dir / "HISTORY.md"
         self.full_history_file = self.history_dir / "FULL_HISTORY.md"
-        self._consecutive_failures = 0  # 新增：记录连续失败次数
+        self._consecutive_failures = 0
         self._ensure_paths()
 
     def _ensure_paths(self):
-        """Create directories and files if they do not exist."""
-        # 1. Ensure directories exist
-        if not self.memory_dir.exists():
-            self.memory_dir.mkdir(parents=True)
-            print(f"[Memory] Created memory directory: {self.memory_dir}")
+        """Create directories and seed empty files on first run."""
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+        if not self.memory_file.exists():
+            self.memory_file.write_text("# Long-Term Memory\n\n- No detailed facts stored yet.\n", encoding="utf-8")
+        if not self.history_file.exists():
+            self.history_file.write_text("# Conversation History\n\n", encoding="utf-8")
+        if not self.full_history_file.exists():
+            self.full_history_file.write_text("# Full Agent Interaction Log\n\n", encoding="utf-8")
 
-        if not self.history_dir.exists():
-            self.history_dir.mkdir(parents=True)
-            print(f"[Memory] Created history directory: {self.history_dir}")
-
-        # 2. Ensure files exist (touch)
-        self._touch_file(self.memory_file, "# Long-Term Memory\n\n- No detailed facts stored yet.\n")
-        self._touch_file(self.history_file, "# Conversation History\n\n")
-        self._touch_file(self.full_history_file, "# Full Agent Interaction Log\n\n")
-
-    def _touch_file(self, filepath: Path, default_content=""):
-        if not filepath.exists():
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(default_content)
-
-    # ─────────────────────────────────────────
-    # 基础读写操作（与之前相同）
-    # ─────────────────────────────────────────
+    # ── Basic read/write ───────────────────────────────────────────────────────
 
     def load_long_term(self) -> str:
-        """Read the content of MEMORY.md."""
+        """Read MEMORY.md content."""
         try:
             return self.memory_file.read_text(encoding="utf-8")
         except FileNotFoundError:
             return ""
 
     def update_long_term(self, content: str):
-        """Overwrite MEMORY.md with new consolidated facts."""
-        with open(self.memory_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        print(f"[Memory] Updated long-term memory (MEMORY.md)")
+        """Overwrite MEMORY.md with consolidated facts."""
+        self.memory_file.write_text(content, encoding="utf-8")
+        print("[Memory] Updated MEMORY.md")
 
     def append_history_entry(self, entry: str):
-        """
-        【升级】追加一条整合摘要到 HISTORY.md。
-        与旧的 append_history(role, content) 不同：
-        这里直接写入 LLM 生成的整合条目字符串（格式已由 LLM 决定）。
-        """
+        """Append a consolidation summary paragraph to HISTORY.md."""
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
-        print(f"[Memory] Appended consolidation entry to HISTORY.md")
+        print("[Memory] Appended entry to HISTORY.md")
 
     def append_history(self, role: str, content: str):
-        """
-        旧版接口：直接记录单条对话到 HISTORY.md（供外部手动调用）。
-        保留兼容性，但推荐使用 consolidate() 自动整合。
-        """
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entry = f"**[{timestamp}] {role.title()}:**\n{content}\n\n---\n\n"
+        """Append a single raw turn to HISTORY.md."""
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"**[{ts}] {role.title()}:**\n{content}\n\n---\n\n"
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry)
 
     def append_full_log(self, title: str, data: Any, format_type: str = "json"):
-        """Log data to FULL_HISTORY.md for debugging/audit（你的独特调试功能，保持不变）。"""
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        content = ""
+        """Append a timestamped debug entry to FULL_HISTORY.md."""
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
         if format_type == "json":
-            if isinstance(data, (dict, list)):
-                try:
-                    content = json.dumps(data, indent=2, default=str)
-                except:
-                    content = str(data)
-            else:
-                content = str(data)
-            entry = f"\n## [{timestamp}] {title}\n```json\n{content}\n```\n"
+            try:
+                body = json.dumps(data, indent=2, default=str) if isinstance(data, (dict, list)) else str(data)
+            except Exception:
+                body = str(data)
+            entry = f"\n## [{ts}] {title}\n```json\n{body}\n```\n"
         else:
-            content = str(data)
-            entry = f"\n## [{timestamp}] {title}\n\n{content}\n"
-
+            entry = f"\n## [{ts}] {title}\n\n{data}\n"
         try:
             with open(self.full_history_file, "a", encoding="utf-8") as f:
                 f.write(entry)
         except Exception as e:
-            print(f"[Memory] Error logging to full history: {e}")
+            print(f"[Memory] Error writing full log: {e}")
 
     def get_memory_context(self) -> str:
-        """Compose a prompt section with memory — 用于拼入 System Prompt。"""
-        long_term = self.load_long_term()
-        return f"\n{long_term}\n" if long_term else ""
+        """Return MEMORY.md content for inclusion in the system prompt."""
+        return self.load_long_term().strip()
 
-    # ─────────────────────────────────────────
-    # 【新增核心功能】LLM 驱动的记忆整合
-    # ─────────────────────────────────────────
+    # ── LLM-driven consolidation ───────────────────────────────────────────────
 
     @staticmethod
     def _format_messages_for_consolidation(messages: list) -> str:
-        """
-        把消息列表格式化为易于 LLM 理解的文本。
-        只包含 role 和 content，过滤工具调用细节。
-        """
+        """Format a message list into plain text for LLM consolidation."""
         lines = []
         for msg in messages:
             role = msg.get("role", "?")
             content = msg.get("content")
-            # 跳过没有文本内容的消息（纯工具调用请求）
             if not content or not isinstance(content, str):
-                continue
-            timestamp = msg.get("timestamp", "")
-            ts_prefix = f"[{timestamp[:16]}] " if timestamp else ""
-            lines.append(f"{ts_prefix}{role.upper()}: {content}")
-        return "\n".join(lines) if lines else "(no content)"
+                continue  # skip tool-call-only messages with no text
+            ts = msg.get("timestamp", "")
+            prefix = f"[{ts[:16]}] " if ts else ""
+            lines.append(f"{prefix}{role.upper()}: {content}")
+        return "\n".join(lines) or "(no content)"
 
     async def consolidate(self, messages: list, provider) -> bool:
         """
-        【核心新方法】使用 LLM 把一段旧对话整合进持久化记忆。
+        Summarise a chunk of old messages into MEMORY.md and HISTORY.md via LLM.
 
-        工作流程：
-          1. 读取当前 MEMORY.md（现有知识库）
-          2. 构造 Prompt：现有记忆 + 待整合的对话段
-          3. 独立调用 LLM，强制它使用 save_memory 工具返回结果
-          4. 从工具调用中取出 history_entry 和 memory_update
-          5. history_entry → 追加写入 HISTORY.md
-          6. memory_update  → 覆写 MEMORY.md（如果有更新）
+        Workflow:
+          1. Read current MEMORY.md (existing knowledge base)
+          2. Prompt the LLM with current memory + the message chunk
+          3. LLM must call the save_memory virtual tool with its output
+          4. Write history_entry → HISTORY.md (append)
+             Write memory_update → MEMORY.md (overwrite if changed)
 
-        返回值：
-          True  = 整合成功，调用方可以推进 last_consolidated 游标
-          False = 整合失败，调用方应稍后重试（不推进游标）
+        Returns True on success (caller may advance the consolidation cursor).
+        Returns False on failure (caller should retry later).
         """
         if not messages:
-            return True  # 没有消息，视为成功
+            return True
 
         current_memory = self.load_long_term()
         conversation_text = self._format_messages_for_consolidation(messages)
-
-        # 构造整合 Prompt
-        prompt = (
-            f"## Current Long-term Memory\n"
-            f"{current_memory or '(empty)'}\n\n"
-            f"## Conversation to Process\n"
-            f"{conversation_text}"
-        )
 
         consolidation_messages = [
             {
@@ -268,107 +236,79 @@ class MemoryStore:
                     "Preserve all existing facts in memory_update, and add new ones.\n"
                     "IMPORTANT: You MUST maintain the following Markdown structure for memory_update:\n"
                     "# Long-term Memory\n"
-                    "## User Information\n"
-                    "(facts about user)\n"
-                    "## Preferences\n"
-                    "(user preferences)\n"
-                    "## Project Context\n"
-                    "(ongoing projects facts)\n"
-                    "## Important Notes\n"
-                    "(other notes)\n"
-                    "---\n"
-                    "*This file is automatically updated...*\n"
+                    "## User Information\n(facts about user)\n"
+                    "## Preferences\n(user preferences)\n"
+                    "## Project Context\n(ongoing projects facts)\n"
+                    "## Important Notes\n(other notes)\n"
+                    "---\n*This file is automatically updated...*\n"
                     "Do NOT remove these headers. Organize facts under the correct header."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"## Current Long-term Memory\n{current_memory or '(empty)'}\n\n"
+                    f"## Conversation to Process\n{conversation_text}"
+                ),
+            },
         ]
 
-        print(f"[Memory] Starting consolidation for {len(messages)} messages...")
-
+        print(f"[Memory] Consolidating {len(messages)} messages...")
         try:
-            # 调用 LLM，传入 save_memory 工具定义
-            # 注意：这是独立的 LLM 调用，不影响 Agent 主循环的 context
-            response = await provider.chat(
-                messages=consolidation_messages,
-                tools=_SAVE_MEMORY_TOOL,
-            )
-
-            # 解析工具调用（兼容 OpenAI 对象风格和 Mock dict 风格）
+            response = await provider.chat(messages=consolidation_messages, tools=_SAVE_MEMORY_TOOL)
             tool_calls = getattr(response, "tool_calls", None) or []
 
             if not tool_calls:
-                # LLM 没有调用工具（可能只返回了文本）
-                print(f"[Memory] Consolidation: LLM did not call save_memory tool")
+                print("[Memory] LLM did not call save_memory tool")
                 return self._handle_failure(messages)
 
-            # 取第一个工具调用的参数
-            first_call = tool_calls[0]
-            if hasattr(first_call, "function"):
-                # OpenAI 对象风格
-                args_str = first_call.function.arguments
-                args = json.loads(args_str) if isinstance(args_str, str) else args_str
-            elif isinstance(first_call, dict):
-                # dict 风格（Mock 等）
-                args = first_call.get("arguments", {})
-                if isinstance(args, str):
-                    args = json.loads(args)
-            else:
-                print(f"[Memory] Consolidation: unexpected tool_call format")
+            tc = tool_calls[0]
+            if not hasattr(tc, "function"):
+                print("[Memory] Unexpected tool_call format")
                 return self._handle_failure(messages)
+            args_str = tc.function.arguments
+            args = json.loads(args_str) if isinstance(args_str, str) else args_str
 
-            # 验证必要字段
             if "history_entry" not in args or "memory_update" not in args:
-                print(f"[Memory] Consolidation: save_memory missing required fields")
+                print("[Memory] save_memory missing required fields")
                 return self._handle_failure(messages)
 
             history_entry = str(args["history_entry"]).strip()
             memory_update = str(args["memory_update"])
 
             if not history_entry:
-                print(f"[Memory] Consolidation: history_entry is empty")
+                print("[Memory] history_entry is empty")
                 return self._handle_failure(messages)
 
-            # 写入 HISTORY.md（追加）
             self.append_history_entry(history_entry)
-
-            # 写入 MEMORY.md（全量覆写，仅在内容有变化时）
             if memory_update != current_memory:
                 self.update_long_term(memory_update)
 
-            # 重置连续失败计数
             self._consecutive_failures = 0
-            print(f"[Memory] Consolidation done for {len(messages)} messages")
+            print(f"[Memory] Consolidation complete ({len(messages)} messages)")
             return True
 
         except Exception as e:
-            print(f"[Memory] Consolidation exception: {e}")
+            print(f"[Memory] Consolidation error: {e}")
             return self._handle_failure(messages)
 
     def _handle_failure(self, messages: list) -> bool:
         """
-        处理整合失败：
-          - 前 N 次失败返回 False（让调用方稍后重试）
-          - 连续失败超过阈值后，降级为原始归档（不依赖 LLM），返回 True
+        Track consecutive failures. After _MAX_FAILURES_BEFORE_RAW_ARCHIVE failures,
+        fall back to raw archiving so old messages can still be cleared from context.
         """
         self._consecutive_failures += 1
-        print(f"[Memory] Consolidation failure #{self._consecutive_failures}")
-
+        print(f"[Memory] Failure #{self._consecutive_failures}")
         if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
-            return False  # 还未达到阈值，告知调用方失败（可重试）
-
-        # 达到阈值：降级原始归档
+            return False  # signal failure so caller retries later
+        # Too many failures: archive the raw text and advance the cursor anyway
         self._raw_archive(messages)
         self._consecutive_failures = 0
-        return True  # 原始归档视为"成功"，游标可以推进
+        return True
 
     def _raw_archive(self, messages: list):
-        """
-        降级兜底：不调用 LLM，直接把原始对话文本写入 HISTORY.md。
-        确保即使 LLM 持续失败，旧消息也不会丢失。
-        """
+        """Fallback: save raw message text to HISTORY.md without LLM processing."""
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         raw_text = self._format_messages_for_consolidation(messages)
-        entry = f"[{ts}] [RAW ARCHIVE — {len(messages)} messages]\n{raw_text}"
-        self.append_history_entry(entry)
-        print(f"[Memory] Degraded to raw archive for {len(messages)} messages")
+        self.append_history_entry(f"[{ts}] [RAW ARCHIVE — {len(messages)} messages]\n{raw_text}")
+        print(f"[Memory] Raw archive written ({len(messages)} messages)")
