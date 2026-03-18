@@ -1,5 +1,16 @@
 import asyncio
 import os
+import sys
+
+# Force UTF-8 globally on Windows before anything else loads
+if os.name == "nt":
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    if sys.stdout.encoding != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr.encoding != "utf-8":
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from core.bus import MessageBus
 from core.channels import CLIChannel, TelegramChannel
 from core.provider import OpenAIProvider, MockProvider
