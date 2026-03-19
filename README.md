@@ -77,58 +77,53 @@ docker compose up --build
 
 SimpleClaw follows a **Bus-driven, Channel-Agent-Tool** architecture. All communication flows through a central message bus, keeping IO (channels) cleanly separated from logic (agent).
 
+The data flow has two paths: **interactive** (user messages via bus) and **scheduled** (cron/heartbeat via `process_direct`).
+
 ```mermaid
-graph TB
-    subgraph Channels ["🔌 Channels (IO)"]
+flowchart LR
+    subgraph IO ["Channels"]
         CLI["CLI"]
         TG["Telegram"]
         WC["WeCom"]
     end
 
-    subgraph Bus ["📬 Message Bus"]
-        IQ["Inbound Queue"]
-        OQ["Outbound Queue"]
+    subgraph Bus ["Message Bus"]
+        direction TB
+        IQ[/"Inbound Queue"/]
+        OQ[/"Outbound Queue"/]
     end
 
-    subgraph Agent ["🧠 Agent Core"]
+    subgraph Core ["Agent Core"]
+        direction TB
         AL["AgentLoop"]
         CB["ContextBuilder"]
-        TL["ToolRegistry"]
         PR["LLM Provider"]
+        TL["ToolRegistry"]
     end
 
-    subgraph Persistence ["💾 Persistence"]
+    subgraph Storage ["Persistence"]
         MEM["MemoryStore"]
         SK["SkillsLoader"]
     end
 
-    subgraph Background ["⏰ Background Services"]
+    subgraph BG ["Background"]
         CRON["CronService"]
         HB["HeartbeatService"]
     end
 
-    CLI -->|"InboundMessage"| IQ
-    TG -->|"InboundMessage"| IQ
-    WC -->|"InboundMessage"| IQ
+    %% Interactive path: Channels <-> Bus <-> Agent
+    CLI & TG & WC -->|"user input"| IQ
+    IQ --> AL
+    AL --> OQ
+    OQ -->|"reply"| CLI & TG & WC
 
-    IQ -->|"consume"| AL
-    AL -->|"OutboundMessage"| OQ
+    %% Agent internals
+    AL --> CB & PR & TL
+    CB --> MEM & SK
 
-    OQ -->|"dispatch"| CLI
-    OQ -->|"dispatch"| TG
-    OQ -->|"dispatch"| WC
-
-    AL --- CB
-    AL --- TL
-    AL --- PR
-    AL --- MEM
-    CB --- MEM
-    CB --- SK
-
-    CRON -->|"process_direct()"| AL
-    HB -->|"process_direct()"| AL
-    CRON -.->|"OutboundMessage"| OQ
-    HB -.->|"OutboundMessage"| OQ
+    %% Scheduled path: Background -> Agent -> Bus (outbound only)
+    CRON & HB -.->|"process_direct()"| AL
+    CRON & HB -.->|"publish response"| OQ
 ```
 
 ---
@@ -180,23 +175,34 @@ SimpleClaw/
 
 ### 1. Message Bus (`bus.py`)
 
-The **MessageBus** is two async queues that decouple all IO from the agent:
+The **MessageBus** is two async queues that decouple all IO from the agent. Messages flow left-to-right through the inbound path, and right-to-left through the outbound path:
 
 ```mermaid
-graph LR
-    C1["Channel A"] -->|"publish_inbound()"| IQ["Inbound Queue"]
-    C2["Channel B"] -->|"publish_inbound()"| IQ
-    IQ -->|"consume_inbound()"| A["AgentLoop"]
-    A -->|"publish_outbound()"| OQ["Outbound Queue"]
-    OQ -->|"consume_outbound()"| D["Dispatcher"]
-    D --> C1
-    D --> C2
+flowchart LR
+    subgraph Producers ["Input"]
+        CLI["CLI"]
+        TG["Telegram"]
+        WC["WeCom"]
+    end
+
+    subgraph Bus ["Message Bus"]
+        IQ[/"Inbound\nQueue"/]
+        OQ[/"Outbound\nQueue"/]
+    end
+
+    subgraph Consumer ["Processing"]
+        AL["AgentLoop"]
+        DP["Dispatcher"]
+    end
+
+    CLI & TG & WC -- "publish_inbound()" --> IQ
+    IQ -- "consume_inbound()" --> AL
+    AL -- "publish_outbound()" --> OQ
+    OQ -- "consume_outbound()" --> DP
+    DP -- "route by channel" --> CLI & TG & WC
 ```
 
-- **InboundMessage**: `channel` + `chat_id` + `content` + `metadata`
-- **OutboundMessage**: `channel` + `chat_id` + `content` + `metadata`
-
-Every channel uses the same message format, so the agent doesn't need to know *which* platform a message came from.
+Both message types share the same structure: `channel` + `chat_id` + `content` + `metadata`. The agent doesn't need to know which platform a message came from — routing is handled entirely by the `channel` field.
 
 ### 2. Channels (`channels/`)
 
