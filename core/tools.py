@@ -14,6 +14,15 @@ class ToolRegistry:
     def __init__(self, memory: MemoryStore = None):
         self._tools = {}
         self.memory = memory
+        # Channel/chat context — set by AgentLoop before each message processing.
+        # Tools that need routing info (e.g. cron) read from here.
+        self._context_channel: str = "cli"
+        self._context_chat_id: str = "user1"
+
+    def set_context(self, channel: str, chat_id: str):
+        """Update the current channel/chat context. Called by AgentLoop each turn."""
+        self._context_channel = channel or "cli"
+        self._context_chat_id = chat_id or "user1"
 
     def register(self, name, func, description, parameters=None):
         self._tools[name] = {"func": func, "description": description, "parameters": parameters}
@@ -37,12 +46,12 @@ class ToolRegistry:
         if name not in self._tools:
             return f"Error: Tool '{name}' not found"
         func = self._tools[name]["func"]
-        
+
         # Filter kwargs to only what the function accepts and exclude unexpected keys
         sig = inspect.signature(func)
         valid_params = set(sig.parameters.keys())
         has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-        
+
         if has_kwargs:
             filtered_args = args
         else:
@@ -153,13 +162,19 @@ def register_cron_tool(registry: ToolRegistry, cron_service) -> None:
             if not message:
                 return "Error: message is required for add action"
             try:
+                # Auto-capture current channel context — no LLM guessing needed
                 task_id = cron_service.add_task(
                     message=message,
                     every_seconds=every_seconds,
                     cron_expr=cron_expr,
                     at=at,
+                    target_channel=registry._context_channel,
+                    target_chat_id=registry._context_chat_id,
                 )
-                return f"Task scheduled successfully. job_id: {task_id}"
+                return (
+                    f"Task scheduled successfully. job_id: {task_id} "
+                    f"(will deliver to {registry._context_channel}:{registry._context_chat_id})"
+                )
             except ValueError as e:
                 return f"Error: {e}"
 
@@ -185,7 +200,8 @@ def register_cron_tool(registry: ToolRegistry, cron_service) -> None:
         "Schedule tasks or reminders to run at a specific time or on a recurring schedule. "
         "Actions: 'add' (schedule a new task), 'list' (show all tasks), 'remove' (cancel a task). "
         "For 'add': provide message + exactly one of: every_seconds (interval in seconds), "
-        "cron_expr (5-field cron expression e.g. '0 9 * * *'), or at (ISO datetime for one-time task).",
+        "cron_expr (5-field cron expression e.g. '0 9 * * *'), or at (ISO datetime for one-time task). "
+        "The target channel is automatically captured from the current conversation context.",
         parameters={
             "type": "object",
             "properties": {
@@ -200,7 +216,8 @@ def register_cron_tool(registry: ToolRegistry, cron_service) -> None:
                 },
                 "every_seconds": {
                     "type": "integer",
-                    "description": "Repeat interval in seconds (e.g. 3600 = hourly, 86400 = daily)",
+                    "minimum": 60,
+                    "description": "Repeat interval in seconds, minimum 60 (e.g. 3600 = hourly, 86400 = daily). Use cron_expr instead for clock-aligned schedules like 'every day at 9am'.",
                 },
                 "cron_expr": {
                     "type": "string",

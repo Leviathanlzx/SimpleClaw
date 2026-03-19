@@ -2,9 +2,8 @@ import asyncio
 import datetime
 import json
 import uuid
-from typing import List, Dict
+from typing import List, Dict, Callable, Awaitable, Any
 
-from .bus import InboundMessage
 from .config import CONFIG_FILE
 
 try:
@@ -14,14 +13,31 @@ except ImportError:
     print("[Cron] croniter not installed. Cron expression scheduling unavailable.")
 
 
+# Type alias for the callback: async fn(task_dict) -> str | None
+OnJobCallback = Callable[[Dict[str, Any]], Awaitable[str | None]]
+
+
 class CronService:
-    def __init__(self, bus, config_tasks: List[Dict]):
-        self.bus = bus
+    """
+    Background cron scheduler.
+
+    Instead of publishing to the inbound bus (which caused responses to be lost),
+    fires an async callback when a task triggers. The callback (wired in main.py)
+    calls agent.process_direct() with an independent session, then publishes the
+    response to the correct output channel via the outbound bus.
+    """
+
+    def __init__(self, config_tasks: List[Dict], on_job: OnJobCallback | None = None):
         self._config_tasks = config_tasks       # static tasks from config.json
         self._dynamic_tasks: Dict[str, Dict] = {}  # id -> task dict
         self._last_run: Dict[str, datetime.datetime] = {}
+        self._on_job = on_job                   # callback for task execution
         self.running = False
         self._load_dynamic_tasks()
+
+    def set_on_job(self, callback: OnJobCallback):
+        """Set or replace the job execution callback (allows late binding)."""
+        self._on_job = callback
 
     # ------------------------------------------------------------------
     # Public API (called by agent via cron tool)
@@ -33,6 +49,8 @@ class CronService:
         every_seconds: int = None,
         cron_expr: str = None,
         at: str = None,
+        target_channel: str = None,
+        target_chat_id: str = None,
     ) -> str:
         """Schedule a new dynamic task. Returns the task ID."""
         if not any([every_seconds, cron_expr, at]):
@@ -65,6 +83,10 @@ class CronService:
                 "cron_expr": cron_expr,
             }
 
+        # Attach output routing — defaults to CLI if not specified
+        task["target_channel"] = target_channel or "cli"
+        task["target_chat_id"] = target_chat_id or "user1"
+
         self._dynamic_tasks[task_id] = task
         self._persist_dynamic_tasks()
         print(f"[Cron] Added dynamic task {task_id}: {message[:60]}")
@@ -93,7 +115,11 @@ class CronService:
             })
 
         for task in self._dynamic_tasks.values():
-            info = {"id": task["id"], "type": task["type"], "message": task["message"]}
+            info = {
+                "id": task["id"], "type": task["type"], "message": task["message"],
+                "target_channel": task.get("target_channel", "cli"),
+                "target_chat_id": task.get("target_chat_id", "user1"),
+            }
             if task["type"] == "interval":
                 info["every_seconds"] = task["interval_seconds"]
             elif task["type"] == "cron":
@@ -120,13 +146,15 @@ class CronService:
                 schedule = task.get("schedule", "* * * * *")
                 if self._should_run_cron(task_id, schedule, now):
                     command_name = task.get("command", "unknown")
-                    print(f"[Cron] Triggering config task: {command_name} ({task.get('description', '')})")
-                    await self.bus.publish_inbound(InboundMessage(
-                        channel="cron",
-                        chat_id="system",
-                        content=f"Execute scheduled task: {command_name}. Description: {task.get('description')}",
-                        metadata={"type": "scheduled_task"},
-                    ))
+                    target_ch = task.get("target_channel", "cli")
+                    target_cid = task.get("target_chat_id", "user1")
+                    print(f"[Cron] Triggering config task: {command_name} -> {target_ch}:{target_cid}")
+                    await self._fire_job({
+                        "id": task_id,
+                        "message": f"Execute scheduled task: {command_name}. Description: {task.get('description', '')}",
+                        "target_channel": target_ch,
+                        "target_chat_id": target_cid,
+                    })
                     self._last_run[task_id] = now
 
             # Dynamic tasks
@@ -150,12 +178,7 @@ class CronService:
 
                 if should_fire:
                     print(f"[Cron] Triggering dynamic task {task_id}: {task['message'][:60]}")
-                    await self.bus.publish_inbound(InboundMessage(
-                        channel="cron",
-                        chat_id="system",
-                        content=task["message"],
-                        metadata={"type": "scheduled_task", "task_id": task_id},
-                    ))
+                    await self._fire_job(task)
                     self._last_run[task_id] = now
 
             if to_remove:
@@ -165,6 +188,16 @@ class CronService:
                 self._persist_dynamic_tasks()
 
             await asyncio.sleep(30)  # check every 30 seconds
+
+    async def _fire_job(self, task: Dict):
+        """Execute a triggered task via the on_job callback."""
+        if not self._on_job:
+            print(f"[Cron] WARNING: No on_job callback set, task {task['id']} output lost!")
+            return
+        try:
+            await self._on_job(task)
+        except Exception as e:
+            print(f"[Cron] Error executing task {task['id']}: {e}")
 
     def _should_run_cron(self, task_id: str, schedule_str: str, current_dt: datetime.datetime) -> bool:
         """Return True if the cron expression matches current minute, and hasn't fired this minute."""

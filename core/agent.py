@@ -49,9 +49,10 @@ class AgentLoop:
             base_prompt=config.agent.system_prompt,
         )
 
-        # Single session (single-user mode).
-        # For multi-user/multi-channel: replace with a SessionManager keyed by channel:chat_id.
-        self.session = Session(key="cli:user1")
+        # Session management: keyed by "channel:chat_id" for isolation.
+        # The primary interactive session is restored from disk on startup.
+        self._sessions: dict[str, Session] = {}
+        self.session = self._get_or_create_session("cli:user1")
 
         # Restore full session from disk on startup
         for m in memory.load_full_session():
@@ -61,11 +62,31 @@ class AgentLoop:
         self._last_sys_prompt = None
         self._last_tool_defs = None
 
+    def _get_or_create_session(self, key: str) -> Session:
+        """Get an existing session or create a new one for the given key."""
+        if key not in self._sessions:
+            self._sessions[key] = Session(key=key)
+        return self._sessions[key]
+
+    def list_sessions(self) -> list[dict]:
+        """Return a list of active session keys and their message counts."""
+        return [
+            {"key": s.key, "messages": len(s.messages)}
+            for s in self._sessions.values()
+            if s.messages
+        ]
+
     async def run(self):
         print("[Agent] Started.")
         while True:
             msg = await self.bus.consume_inbound()
             print(f"[Agent] Received from {msg.channel}: {msg.content}")
+
+            # Set tool context so tools like cron auto-capture the current channel
+            self.tools.set_context(msg.channel, msg.chat_id)
+
+            # Use the primary interactive session for bus messages
+            self.session = self._get_or_create_session(f"{msg.channel}:{msg.chat_id}")
 
             # Build system prompt — re-reads MEMORY.md each time so consolidation is visible
             sys_prompt = self.context_builder.build_system_prompt()
@@ -120,6 +141,56 @@ class AgentLoop:
 
             current_tokens = self.session.estimate_tokens()
             print(f"[Agent] Context: {current_tokens}/{self.CONTEXT_WINDOW_TOKENS} tokens")
+
+    # ── Direct processing (used by cron/heartbeat, bypasses bus) ──────────
+
+    async def process_direct(
+        self,
+        content: str,
+        session_key: str,
+        channel: str = "cli",
+        chat_id: str = "user1",
+    ) -> str:
+        """
+        Process a message directly without going through the inbound bus.
+
+        Used by CronService and HeartbeatService to run agent logic with:
+          - An independent session (keyed by session_key) to avoid polluting user conversations
+          - Correct channel/chat_id context for tool routing and outbound delivery
+          - No outbound publishing — caller decides where to send the response
+
+        Returns the final response text.
+        """
+        print(f"[Agent] process_direct ({session_key}): {content[:80]}")
+
+        # Set tool context for this invocation
+        self.tools.set_context(channel, chat_id)
+
+        # Use an independent session for isolation
+        session = self._get_or_create_session(session_key)
+
+        sys_prompt = self.context_builder.build_system_prompt()
+
+        session.add_message("user", content)
+        history = session.get_history()
+
+        final_response, new_messages = await self._think_and_act(
+            sys_prompt, history, channel=channel, chat_id=chat_id
+        )
+
+        # Save intermediate messages to the isolated session
+        for m in new_messages:
+            if m.get("role") in ("assistant", "tool"):
+                extra = {}
+                for key in ("tool_calls", "tool_call_id", "name"):
+                    if key in m:
+                        extra[key] = m[key]
+                session.add_message(m["role"], m.get("content") or "", **extra)
+
+        session.add_message("assistant", final_response)
+
+        print(f"[Agent] process_direct ({session_key}) done, response: {final_response[:80]}")
+        return final_response
 
     async def _maybe_consolidate(self):
         """

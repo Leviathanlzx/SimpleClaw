@@ -3,17 +3,19 @@ HeartbeatService: Periodic background loop that wakes the agent to check HEARTBE
 
 Two-phase design:
   Phase 1 (decide): lightweight LLM call with virtual tool → skip or run
-  Phase 2 (execute): publish InboundMessage to bus so the full agent loop handles it
+  Phase 2 (execute): call agent.process_direct() with an independent session,
+                     then deliver the response to the best available channel.
 
-This keeps heartbeat decoupled from the agent internals — it simply injects a
-trigger message into the bus, and the agent handles it like any other message.
+This keeps heartbeat decoupled from the agent internals — it simply invokes the
+agent via callback, and the wiring in main.py handles outbound delivery.
 """
 import asyncio
 import json
 import datetime
 from pathlib import Path
+from typing import Callable, Awaitable
 
-from .bus import MessageBus, InboundMessage
+from .bus import MessageBus, OutboundMessage
 from .provider import LLMProvider
 
 # Virtual tool used only by the decision call — never registered in ToolRegistry
@@ -42,14 +44,19 @@ _HEARTBEAT_TOOL = [
     }
 ]
 
+# Type alias for the agent callback: async fn(content, session_key, channel, chat_id) -> str
+ProcessDirectCallback = Callable[[str, str, str, str], Awaitable[str]]
+# Type alias for listing sessions: fn() -> list[dict]
+ListSessionsCallback = Callable[[], list[dict]]
+
 
 class HeartbeatService:
     """
     Runs in the background, periodically reading HEARTBEAT.md.
 
     Phase 1: LLM decides skip/run via a virtual tool call (cheap, no full agent loop).
-    Phase 2: If "run", publishes an InboundMessage to the bus so the full agent loop
-             picks it up and handles it with all tools/memory available.
+    Phase 2: If "run", calls agent.process_direct() with the best target channel,
+             then publishes the response to that channel's outbound queue.
     """
 
     def __init__(
@@ -59,12 +66,18 @@ class HeartbeatService:
         bus: MessageBus,
         interval_s: int = 1800,
         enabled: bool = True,
+        process_direct: ProcessDirectCallback | None = None,
+        list_sessions: ListSessionsCallback | None = None,
+        enabled_channels: set[str] | None = None,
     ):
         self.workspace = workspace
         self.provider = provider
         self.bus = bus
         self.interval_s = interval_s
         self.enabled = enabled
+        self._process_direct = process_direct
+        self._list_sessions = list_sessions
+        self._enabled_channels = enabled_channels or set()
         self._running = False
 
     @property
@@ -78,6 +91,29 @@ class HeartbeatService:
             except Exception:
                 return None
         return None
+
+    def _pick_target(self) -> tuple[str, str]:
+        """
+        Smart target selection: find the best channel to deliver heartbeat results.
+
+        Prefers the most recently active external channel (telegram, wecom) over CLI,
+        since CLI users may not be watching the terminal.
+        """
+        if self._list_sessions:
+            for item in self._list_sessions():
+                key = item.get("key", "")
+                if ":" not in key:
+                    continue
+                channel, chat_id = key.split(":", 1)
+                # Skip internal channels
+                if channel in ("cli", "system", "heartbeat", "cron"):
+                    continue
+                # Only route to enabled channels
+                if channel in self._enabled_channels and chat_id:
+                    return channel, chat_id
+
+        # Fallback to CLI
+        return "cli", "user1"
 
     async def _decide(self, content: str) -> tuple[str, str]:
         """Phase 1: ask LLM to decide skip/run via the virtual heartbeat tool call.
@@ -119,7 +155,7 @@ class HeartbeatService:
         return args.get("action", "skip"), args.get("tasks", "")
 
     async def _tick(self) -> None:
-        """Single heartbeat tick: read → decide → maybe publish to bus."""
+        """Single heartbeat tick: read → decide → maybe execute via callback."""
         content = self._read_heartbeat_file()
         if not content or not content.strip():
             print("[Heartbeat] HEARTBEAT.md missing or empty, skipping.")
@@ -138,17 +174,50 @@ class HeartbeatService:
             print("[Heartbeat] No active tasks. Going back to sleep.")
             return
 
-        print(f"[Heartbeat] Active tasks found — waking agent: {tasks!r}")
-        await self.bus.publish_inbound(
-            InboundMessage(
-                channel="heartbeat",
-                chat_id="system",
-                content=(
-                    f"[HEARTBEAT {now_str}] You have background tasks to address:\n{tasks}"
-                ),
+        print(f"[Heartbeat] Active tasks found — executing: {tasks!r}")
+
+        # Phase 2: execute via agent callback
+        if not self._process_direct:
+            # Fallback: publish to bus inbound (old behavior)
+            print("[Heartbeat] WARNING: No process_direct callback, falling back to bus.")
+            from .bus import InboundMessage
+            await self.bus.publish_inbound(InboundMessage(
+                channel="heartbeat", chat_id="system",
+                content=f"[HEARTBEAT {now_str}] You have background tasks to address:\n{tasks}",
                 metadata={"type": "heartbeat"},
+            ))
+            return
+
+        # Pick best target channel
+        channel, chat_id = self._pick_target()
+        print(f"[Heartbeat] Target: {channel}:{chat_id}")
+
+        try:
+            response = await self._process_direct(
+                f"[HEARTBEAT {now_str}] You have background tasks to address:\n{tasks}",
+                "heartbeat:system",       # independent session key
+                channel,
+                chat_id,
             )
-        )
+        except Exception as e:
+            print(f"[Heartbeat] Execution failed: {e}")
+            return
+
+        if not response:
+            return
+
+        # Deliver the response to the target channel
+        if channel == "cli":
+            # CLI: just print, no bus publish needed
+            print(f"\n[Heartbeat] > Agent: {response}\n")
+        else:
+            # External channel: publish to outbound bus for delivery
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=response,
+            ))
+            print(f"[Heartbeat] Response delivered to {channel}:{chat_id}")
 
     async def start(self) -> None:
         if not self.enabled:
