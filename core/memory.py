@@ -163,10 +163,31 @@ class MemoryStore:
             f.write(entry.rstrip() + "\n\n")
         print("[Memory] Appended entry to HISTORY.md")
 
-    def append_history(self, role: str, content: str):
+    def append_history(self, role: str, content: str, tool_calls=None, tool_name: str = None):
         """Append a single raw turn to HISTORY.md."""
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entry = f"**[{ts}] {role.title()}:**\n{content}\n\n---\n\n"
+
+        if tool_calls:
+            # assistant requesting tool calls — log each call's name + args
+            lines = []
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "?")
+                try:
+                    args = json.loads(fn["arguments"]) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
+                    args_str = json.dumps(args, ensure_ascii=False)
+                except Exception:
+                    args_str = str(fn.get("arguments", ""))
+                lines.append(f"- `{name}({args_str})`")
+            body = "\n".join(lines)
+            entry = f"**[{ts}] Assistant (tool call):**\n{body}\n\n---\n\n"
+        elif role == "tool":
+            # tool result
+            label = f"Tool result ({tool_name})" if tool_name else "Tool result"
+            entry = f"**[{ts}] {label}:**\n{content}\n\n---\n\n"
+        else:
+            entry = f"**[{ts}] {role.title()}:**\n{content}\n\n---\n\n"
+
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry)
 
@@ -191,6 +212,33 @@ class MemoryStore:
         """Return MEMORY.md content for inclusion in the system prompt."""
         return self.load_long_term().strip()
 
+    # ── Session persistence ────────────────────────────────────────────────────
+
+    def save_session(self, messages: list):
+        """Overwrite temp.json with the full current session messages."""
+        path = self.memory_dir / "temp.json"
+        try:
+            path.write_text(
+                json.dumps(messages, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"[Memory] Failed to save session: {e}")
+
+    def load_full_session(self) -> list:
+        """Load the entire temp.json into session on startup."""
+        path = self.memory_dir / "temp.json"
+        if not path.exists():
+            return []
+        try:
+            messages = json.loads(path.read_text(encoding="utf-8"))
+            user_count = sum(1 for m in messages if m.get("role") == "user")
+            print(f"[Memory] Restored {len(messages)} messages ({user_count} rounds) from temp.json")
+            return messages
+        except Exception as e:
+            print(f"[Memory] Failed to load session: {e}")
+            return []
+
     # ── LLM-driven consolidation ───────────────────────────────────────────────
 
     @staticmethod
@@ -200,11 +248,33 @@ class MemoryStore:
         for msg in messages:
             role = msg.get("role", "?")
             content = msg.get("content")
-            if not content or not isinstance(content, str):
-                continue  # skip tool-call-only messages with no text
             ts = msg.get("timestamp", "")
             prefix = f"[{ts[:16]}] " if ts else ""
-            lines.append(f"{prefix}{role.upper()}: {content}")
+
+            if msg.get("tool_calls"):
+                # Assistant requesting tool calls — format each call
+                calls = []
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "?")
+                    try:
+                        args = json.loads(fn["arguments"]) if isinstance(fn.get("arguments"), str) else fn.get("arguments", {})
+                        args_str = json.dumps(args, ensure_ascii=False)
+                    except Exception:
+                        args_str = str(fn.get("arguments", ""))
+                    calls.append(f"{name}({args_str})")
+                lines.append(f"{prefix}ASSISTANT called: {', '.join(calls)}")
+                if content:
+                    lines.append(f"{prefix}ASSISTANT: {content}")
+
+            elif role == "tool":
+                # Tool result — include tool name if available
+                tool_name = msg.get("name", "tool")
+                lines.append(f"{prefix}TOOL [{tool_name}] returned: {content}")
+
+            elif content and isinstance(content, str):
+                lines.append(f"{prefix}{role.upper()}: {content}")
+
         return "\n".join(lines) or "(no content)"
 
     async def consolidate(self, messages: list, provider) -> bool:

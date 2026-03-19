@@ -12,9 +12,9 @@ if os.name == "nt":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from core.bus import MessageBus
-from core.channels import CLIChannel, TelegramChannel
+from core.channels import CLIChannel, TelegramChannel, WecomChannel
 from core.provider import OpenAIProvider, MockProvider
-from core.tools import setup_tools
+from core.tools import setup_tools, register_cron_tool
 from core.agent import AgentLoop
 from core.config import config, WORKSPACE_DIR
 from core.memory import MemoryStore
@@ -49,7 +49,6 @@ async def main():
 
     # 3. Setup Tools & Agent
     tools = setup_tools(memory)
-    agent = AgentLoop(bus, provider, tools, memory, skills)
 
     # 4. Senses (Channels)
     cli_channel = CLIChannel(bus)
@@ -57,6 +56,9 @@ async def main():
     # 5. Cron Service
     cron_tasks = config.cron.tasks
     cron_service = CronService(bus, cron_tasks)
+    register_cron_tool(tools, cron_service)
+
+    agent = AgentLoop(bus, provider, tools, memory, skills)
 
     # 6. Heartbeat Service
     heartbeat_service = HeartbeatService(
@@ -78,20 +80,35 @@ async def main():
     if telegram_channel:
         print("[Main] Telegram channel enabled.")
 
-    # 8. Start Services
+    # 8. WeCom Channel (optional, enabled via config)
+    wc_cfg = config.wecom
+    wecom_channel = WecomChannel(
+        bot_id=wc_cfg.bot_id,
+        secret=wc_cfg.secret,
+        bus=bus,
+        allowed_user_ids=wc_cfg.allowed_user_ids,
+        welcome_message=wc_cfg.welcome_message,
+    ) if wc_cfg.enabled else None
+
+    if wecom_channel:
+        print("[Main] WeCom channel enabled.")
+
+    # 9. Start Services
     services = [
         agent.run(),                           # Logic Consumer
         cli_channel.start(),                   # Input Producer
-        _channel_dispatcher(bus, cli_channel, telegram_channel),  # Output Consumer
+        _channel_dispatcher(bus, cli_channel, telegram_channel, wecom_channel),  # Output Consumer
         cron_service.start(),                  # Timer Producer
         heartbeat_service.start(),             # Heartbeat Producer
     ]
     if telegram_channel:
         services.append(telegram_channel.start())  # Telegram Inbound Producer
+    if wecom_channel:
+        services.append(wecom_channel.start())     # WeCom Inbound Producer
 
     await asyncio.gather(*services)
 
-async def _channel_dispatcher(bus, cli_channel, telegram_channel=None):
+async def _channel_dispatcher(bus, cli_channel, telegram_channel=None, wecom_channel=None):
     """
     Routes OutboundMessages from Bus -> appropriate Channel.
     """
@@ -102,6 +119,9 @@ async def _channel_dispatcher(bus, cli_channel, telegram_channel=None):
         elif msg.channel == "telegram":
             if telegram_channel:
                 await telegram_channel.send(msg)
+        elif msg.channel == "wecom":
+            if wecom_channel:
+                await wecom_channel.send(msg)
         elif msg.channel == "heartbeat":
             # Heartbeat responses are printed to CLI with a distinct prefix
             print(f"\n[Heartbeat] > Agent: {msg.content}\n")

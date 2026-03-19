@@ -15,5 +15,6 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "python-telegram-bot>=22.7",
     "requests>=2.32.5",
+    "wecom-aibot-sdk-python>=0.1.6",
 ]
 

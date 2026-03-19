@@ -1,0 +1,18 @@
+services:
+  simpleclaw:
+    container_name: simpleclaw
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./configs:/app/configs       # config.json persists on host
+      - ./workspace:/app/workspace   # memory, history, skills persist on host
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M

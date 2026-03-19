@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.git
+.env
+dist/
+build/
+reference/
+workspace/memory/
+workspace/history/
+configs/

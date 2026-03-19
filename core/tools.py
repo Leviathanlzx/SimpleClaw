@@ -137,6 +137,89 @@ def list_dir(path: str = "."):
     except Exception as e:
         return f"Error listing directory: {e}"
 
+def register_cron_tool(registry: ToolRegistry, cron_service) -> None:
+    """Register the cron tool onto an existing ToolRegistry using a CronService instance."""
+    import json as _json
+
+    def cron_tool(
+        action: str,
+        message: str = None,
+        every_seconds: int = None,
+        cron_expr: str = None,
+        at: str = None,
+        job_id: str = None,
+    ) -> str:
+        if action == "add":
+            if not message:
+                return "Error: message is required for add action"
+            try:
+                task_id = cron_service.add_task(
+                    message=message,
+                    every_seconds=every_seconds,
+                    cron_expr=cron_expr,
+                    at=at,
+                )
+                return f"Task scheduled successfully. job_id: {task_id}"
+            except ValueError as e:
+                return f"Error: {e}"
+
+        elif action == "list":
+            tasks = cron_service.list_tasks()
+            if not tasks:
+                return "No scheduled tasks."
+            return _json.dumps(tasks, default=str, indent=2)
+
+        elif action == "remove":
+            if not job_id:
+                return "Error: job_id is required for remove action"
+            if cron_service.remove_task(job_id):
+                return f"Task {job_id} removed."
+            return f"Task {job_id} not found."
+
+        else:
+            return f"Unknown action: {action}. Use: add, list, remove"
+
+    registry.register(
+        "cron",
+        cron_tool,
+        "Schedule tasks or reminders to run at a specific time or on a recurring schedule. "
+        "Actions: 'add' (schedule a new task), 'list' (show all tasks), 'remove' (cancel a task). "
+        "For 'add': provide message + exactly one of: every_seconds (interval in seconds), "
+        "cron_expr (5-field cron expression e.g. '0 9 * * *'), or at (ISO datetime for one-time task).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "remove"],
+                    "description": "Action: 'add' to schedule, 'list' to show all, 'remove' to cancel",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The task or reminder message (required for add)",
+                },
+                "every_seconds": {
+                    "type": "integer",
+                    "description": "Repeat interval in seconds (e.g. 3600 = hourly, 86400 = daily)",
+                },
+                "cron_expr": {
+                    "type": "string",
+                    "description": "5-field cron expression (e.g. '0 9 * * *' = 9am daily, '0 9 * * 1-5' = weekdays)",
+                },
+                "at": {
+                    "type": "string",
+                    "description": "ISO datetime for a one-time task (e.g. '2024-06-01T09:00:00')",
+                },
+                "job_id": {
+                    "type": "string",
+                    "description": "Task ID returned by add (required for remove)",
+                },
+            },
+            "required": ["action"],
+        },
+    )
+
+
 def setup_tools(memory: MemoryStore = None) -> ToolRegistry:
     registry = ToolRegistry(memory)
     

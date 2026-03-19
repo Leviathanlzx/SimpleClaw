@@ -53,6 +53,10 @@ class AgentLoop:
         # For multi-user/multi-channel: replace with a SessionManager keyed by channel:chat_id.
         self.session = Session(key="cli:user1")
 
+        # Restore full session from disk on startup
+        for m in memory.load_full_session():
+            self.session.messages.append(m)
+
         # Track last logged values to avoid writing identical entries to FULL_HISTORY.md
         self._last_sys_prompt = None
         self._last_tool_defs = None
@@ -97,7 +101,7 @@ class AgentLoop:
                         if key in m:
                             extra[key] = m[key]
                     self.session.add_message(m["role"], m.get("content") or "", **extra)
-                    self.memory.append_history(m["role"], m.get("content") or "")
+                    self.memory.append_history(m["role"], m.get("content") or "", tool_calls=m.get("tool_calls"), tool_name=m.get("name"))
 
             # Save the final assistant reply
             self.session.add_message("assistant", final_response)
@@ -106,6 +110,9 @@ class AgentLoop:
 
             # Check budget again — this turn may have pushed us over the limit
             await self._maybe_consolidate()
+
+            # Persist session to disk after every turn
+            self.memory.save_session(self.session.messages)
 
             await self.bus.publish_outbound(
                 OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=final_response)
@@ -120,7 +127,7 @@ class AgentLoop:
 
         Each round finds a safe cut point (always at a user-turn boundary to keep
         conversation structure valid), passes the old messages to MemoryStore.consolidate(),
-        and advances the session cursor so those messages are excluded from future LLM calls.
+        then physically deletes those messages from session and history.json.
         """
         target = int(self.CONTEXT_WINDOW_TOKENS * self.CONSOLIDATION_TARGET_RATIO)
 
@@ -139,7 +146,7 @@ class AgentLoop:
                 print("[Agent] No safe consolidation boundary, skipping")
                 return
 
-            chunk = self.session.messages[self.session.last_consolidated : boundary]
+            chunk = self.session.messages[:boundary]
             if not chunk:
                 return
 
@@ -150,8 +157,11 @@ class AgentLoop:
                 print("[Agent] Consolidation failed, will retry next round")
                 return
 
-            self.session.last_consolidated = boundary
-            print(f"[Agent] Cursor → {boundary}, tokens now: {self.session.estimate_tokens()}")
+            # Physically remove consolidated messages from session and history.json
+            self.session.messages = self.session.messages[boundary:]
+            self.session.last_consolidated = 0
+            self.memory.save_session(self.session.messages)
+            print(f"[Agent] Removed {boundary} messages, tokens now: {self.session.estimate_tokens()}")
 
     def _pick_consolidation_boundary(self, tokens_to_remove: int) -> int | None:
         """
@@ -160,19 +170,16 @@ class AgentLoop:
         Rules:
           - Must cut at a user-turn boundary (to keep assistant/tool pairs intact)
           - Must remove at least tokens_to_remove tokens
-          - Scans forward from last_consolidated
+          - Always scans from index 0 (messages are physically deleted after consolidation)
 
         Returns the message index where the cut should happen, or None if not found.
         """
-        start = self.session.last_consolidated
         messages = self.session.messages
-
         removed_tokens = 0
         last_safe_boundary = None
 
-        for idx in range(start, len(messages)):
-            msg = messages[idx]
-            if idx > start and msg.get("role") == "user":
+        for idx, msg in enumerate(messages):
+            if idx > 0 and msg.get("role") == "user":
                 last_safe_boundary = idx
                 if removed_tokens >= tokens_to_remove:
                     return last_safe_boundary
@@ -228,7 +235,16 @@ class AgentLoop:
             # Record the assistant's tool-call request, then execute each tool
             assistant_msg = _build_tool_call_message(response)
             new_messages.append(assistant_msg)
-            self.memory.append_full_log("ASSISTANT_CALL", assistant_msg, format_type="json")
+            _log_calls = [
+                {
+                    "tool": tc["function"]["name"],
+                    "args": json.loads(tc["function"]["arguments"])
+                           if isinstance(tc["function"]["arguments"], str)
+                           else tc["function"]["arguments"],
+                }
+                for tc in assistant_msg.get("tool_calls", [])
+            ]
+            self.memory.append_full_log("ASSISTANT_CALL", _log_calls, format_type="json")
 
             for tc in tool_calls:
                 func_name = tc.function.name
@@ -250,6 +266,6 @@ class AgentLoop:
                     "content": str(result),
                 }
                 new_messages.append(tool_msg)
-                self.memory.append_full_log("TOOL", tool_msg, format_type="json")
+                self.memory.append_full_log("TOOL_RESULT", {"tool": func_name, "result": str(result)}, format_type="json")
 
         return "Thinking loop limit reached.", new_messages

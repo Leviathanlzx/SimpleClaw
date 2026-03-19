@@ -38,12 +38,21 @@ class TelegramConfig:
     allowed_user_ids: List[int] = field(default_factory=list)  # empty = accept all users
 
 @dataclass
+class WecomConfig:
+    enabled: bool = False
+    bot_id: str = ""
+    secret: str = ""
+    allowed_user_ids: List[str] = field(default_factory=list)  # empty = accept all users
+    welcome_message: str = ""
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     cron: CronConfig = field(default_factory=CronConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    wecom: WecomConfig = field(default_factory=WecomConfig)
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -52,7 +61,8 @@ class AppConfig:
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 CONFIG_DIR = PROJECT_ROOT / "configs"
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+CONFIG_TEMPLATE = CONFIG_DIR / "config.json"   # source template (bundled in image)
+CONFIG_FILE = WORKSPACE_DIR / "config.json"    # runtime config (in mounted volume)
 SIMPLECLAW_SKILLS_DIR = PROJECT_ROOT / "skills"
 
 
@@ -77,6 +87,7 @@ DEFAULT_CONFIG = {
     },
     "heartbeat": {"enabled": True, "interval_s": 1800},
     "telegram": {"enabled": False, "token": "", "allowed_user_ids": []},
+    "wecom": {"enabled": False, "bot_id": "", "secret": "", "allowed_user_ids": [], "welcome_message": ""},
 }
 
 # Default workspace context files loaded into the system prompt
@@ -208,10 +219,15 @@ class ConfigLoader:
                 print(f"[Config] Created default context file: {filename}")
 
     def _create_config_file(self):
-        """Write default config.json if it doesn't exist."""
-        if not CONFIG_FILE.exists():
-            print(f"[Config] Creating default config at: {CONFIG_FILE}")
+        """Copy config template to workspace on first run, or create default if template missing."""
+        if CONFIG_FILE.exists():
+            return
+        if CONFIG_TEMPLATE.exists():
+            shutil.copy2(CONFIG_TEMPLATE, CONFIG_FILE)
+            print(f"[Config] Copied config template to workspace: {CONFIG_FILE}")
+        else:
             CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=4), encoding="utf-8")
+            print(f"[Config] Created default config at: {CONFIG_FILE}")
 
     def load(self) -> AppConfig:
         """Load configuration from config.json and parse into dataclasses."""
@@ -229,6 +245,7 @@ class ConfigLoader:
         agent_kwargs = {k: v for k, v in data.get("agent", {}).items() if hasattr(AgentConfig, k)}
         heartbeat_kwargs = {k: v for k, v in data.get("heartbeat", {}).items() if hasattr(HeartbeatConfig, k)}
         telegram_kwargs = {k: v for k, v in data.get("telegram", {}).items() if hasattr(TelegramConfig, k)}
+        wecom_kwargs = {k: v for k, v in data.get("wecom", {}).items() if hasattr(WecomConfig, k)}
 
         return AppConfig(
             llm=LLMConfig(**llm_kwargs),
@@ -236,6 +253,7 @@ class ConfigLoader:
             cron=CronConfig(tasks=data.get("cron", {}).get("tasks", [])),
             heartbeat=HeartbeatConfig(**heartbeat_kwargs),
             telegram=TelegramConfig(**telegram_kwargs),
+            wecom=WecomConfig(**wecom_kwargs),
         )
 
 
